@@ -224,18 +224,26 @@ export default function Home() {
             className="border-t border-slate-200 bg-white px-3 md:px-4 py-2 md:py-3 flex gap-2 items-end"
           >
             <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              rows={2}
-              className="flex-1 resize-none rounded-xl border border-slate-300 px-3 py-2 text-xs md:text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 bg-slate-50"
-              placeholder="ここに質問を入力して、Enter で送信します（Shift + Enter で改行）。"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit();
-                }
-              }}
-            />
+  value={input}
+  onChange={(e) => setInput(e.target.value)}
+  rows={2}
+  className="
+    flex-1 resize-none rounded-xl border border-slate-300 px-3 py-2 
+    text-xs md:text-sm 
+    text-slate-900
+    placeholder-slate-400
+    focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400
+    bg-slate-50
+  "
+  placeholder="ここに質問を入力して、Enter で送信します（Shift + Enter で改行）。"
+  onKeyDown={(e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  }}
+/>
+
             <button
               type="submit"
               disabled={loading}
