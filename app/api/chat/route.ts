@@ -69,16 +69,24 @@ const SYSTEM_PROMPT = `
 `;
 
 export async function POST(req: NextRequest) {
- const { data: students, error } = await supabase
-  .from("students")
-  .select("*");
+  // ① まず最初に message を読む
+  const { message } = await req.json();
 
-console.log("students:", students);
+  // ② students を取得（テスト用）
+  const { data: students, error: studentsError } = await supabase
+    .from("students")
+    .select("*");
 
-return NextResponse.json({ students });
+  // ③ Supabase に質問ログを保存
+  const { error: insertError } = await supabase
+    .from("responses")
+    .insert({
+      user_id: "debug",
+      question: message,
+      answer: "これはSupabase接続テストです",
+    });
 
-const { message } = await req.json();
-
+  // ④ OpenAI に投げる
   const completion = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
     messages: [
@@ -89,7 +97,14 @@ const { message } = await req.json();
 
   const reply =
     completion.choices[0].message.content ??
-    "すみません、うまく回答できませんでした。もう一度、少しだけ状況をくわしく教えてもらえますか？";
+    "すみません、うまく回答できませんでした。";
 
-  return NextResponse.json({ reply });
+  // ⑤ 最後に1回だけ return
+  return NextResponse.json({
+    reply,
+    students,
+    studentsError,
+    insertError,
+  });
 }
+
