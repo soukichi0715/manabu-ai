@@ -69,47 +69,29 @@ const SYSTEM_PROMPT = `
 `;
 
 export async function POST(req: NextRequest) {
+  const { message } = await req.json();
+
+  // ①（任意）Supabaseに保存（失敗しても落とさない）
   try {
-    // ① まず最初に message を読む
-    const { message } = await req.json();
-
-    // ② Supabaseに質問ログを保存（失敗しても原因がわかるように error を取る）
-    const { error: insertError } = await supabase
-      .from("responses")
-      .insert({
-        user_id: "debug",
-        question: message,
-        answer: "これはSupabase接続テストです",
-      });
-
-    if (insertError) {
-      console.error("Supabase insert error:", insertError);
-      return NextResponse.json(
-        { error: "Supabase insert failed", details: insertError.message },
-        { status: 500 }
-      );
-    }
-
-    // ③ OpenAIへ
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: message },
-      ],
+    await supabase.from("responses").insert({
+      user_id: "debug",
+      question: message,
+      answer: "保存テスト",
     });
+  } catch (e) {}
 
-    const reply =
-      completion.choices?.[0]?.message?.content ??
-      "すみません、うまく回答できませんでした。";
+  // ② OpenAI
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4.1-mini",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: message },
+    ],
+  });
 
-    // ④ 最後に1回だけreturn（フロントが期待してるのは reply ）
-    return NextResponse.json({ reply });
-  } catch (e: any) {
-    console.error("API Error:", e);
-    return NextResponse.json(
-      { error: "Server error", details: e?.message ?? String(e) },
-      { status: 500 }
-    );
-  }
+  const reply =
+    completion.choices[0]?.message?.content ?? "すみません、うまく回答できませんでした。";
+
+  // ③ 最後のreturnはこれ1個だけ
+  return NextResponse.json({ reply });
 }
