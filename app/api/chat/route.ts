@@ -1,9 +1,14 @@
+import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 const SYSTEM_PROMPT = `
 あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
@@ -64,7 +69,15 @@ const SYSTEM_PROMPT = `
 `;
 
 export async function POST(req: NextRequest) {
-  const { message } = await req.json();
+ const { data: students, error } = await supabase
+  .from("students")
+  .select("*");
+
+console.log("students:", students);
+
+return NextResponse.json({ students });
+
+const { message } = await req.json();
 
   const completion = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
