@@ -75,6 +75,7 @@ export async function POST(req: NextRequest) {
   try {
     await supabase.from("responses").insert({
       user_id: "debug",
+      test_id: "debug-test",
       question: message,
       answer: "保存テスト",
     });
