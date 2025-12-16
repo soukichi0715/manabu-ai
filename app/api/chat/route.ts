@@ -69,42 +69,59 @@ const SYSTEM_PROMPT = `
 `;
 
 export async function POST(req: NextRequest) {
-  // ① まず最初に message を読む
-  const { message } = await req.json();
+  try {
+    // ① まず最初に message を読む
+    const { message } = await req.json();
 
-  // ② students を取得（テスト用）
-  const { data: students, error: studentsError } = await supabase
-    .from("students")
-    .select("*");
+    // ② students を取得（テスト用） ※不要なら後で消せる
+    const { data: students, error: studentsError } = await supabase
+      .from("students")
+      .select("*");
 
-  // ③ Supabase に質問ログを保存
-  const { error: insertError } = await supabase
-    .from("responses")
-    .insert({
-      user_id: "debug",
-      question: message,
-      answer: "これはSupabase接続テストです",
+    if (studentsError) {
+      console.error("students select error:", studentsError);
+    }
+
+    // ③ OpenAI に投げる
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: message },
+      ],
     });
 
-  // ④ OpenAI に投げる
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4.1-mini",
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: message },
-    ],
-  });
+    const reply =
+      completion.choices[0]?.message?.content ??
+      "すみません、うまく回答できませんでした。";
 
-  const reply =
-    completion.choices[0].message.content ??
-    "すみません、うまく回答できませんでした。";
+    // ④ Supabase に「質問＆AI返答」を保存（ここが本番）
+    const { error: insertError } = await supabase.from("responses").insert({
+      user_id: "debug",
+      question: message,
+      answer: reply,
+    });
 
-  // ⑤ 最後に1回だけ return
-  return NextResponse.json({
-    reply,
-    students,
-    studentsError,
-    insertError,
-  });
+    if (insertError) {
+      console.error("insert error:", insertError);
+      // insert失敗が分かるように、APIとしてもエラー返す
+      return NextResponse.json(
+        { ok: false, error: insertError.message },
+        { status: 500 }
+      );
+    }
+
+    // ⑤ 最後に1回だけ return
+    return NextResponse.json({
+      ok: true,
+      reply,
+      students, // テスト表示（不要なら消してOK）
+    });
+  } catch (e: any) {
+    console.error("POST error:", e);
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? "unknown error" },
+      { status: 500 }
+    );
+  }
 }
-
