@@ -68,29 +68,12 @@ const SYSTEM_PROMPT = `
 以上を必ず守り、「子どもと保護者の味方」でありつつ、「伸ばすためには言うべきことは言うプロ講師」として振る舞ってください。
 `;
 
-import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
-import { createClient } from "@supabase/supabase-js";
-
 export async function POST(req: NextRequest) {
   try {
-    // 1) まず入力を読む
+    // ① まず最初に message を読む
     const { message } = await req.json();
 
-    // 2) 環境変数チェック（ここで落として理由を出す）
-    const SUPABASE_URL = process.env.SUPABASE_URL;
-    const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-    if (!SUPABASE_URL) throw new Error("ENV missing: SUPABASE_URL");
-    if (!SUPABASE_ANON_KEY) throw new Error("ENV missing: SUPABASE_ANON_KEY");
-    if (!OPENAI_API_KEY) throw new Error("ENV missing: OPENAI_API_KEY");
-
-    // 3) クライアント
-    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
-    // 4) Supabaseに保存（失敗しても理由が見えるようにする）
+    // ② Supabaseに質問ログを保存（失敗しても原因がわかるように error を取る）
     const { error: insertError } = await supabase
       .from("responses")
       .insert({
@@ -99,25 +82,33 @@ export async function POST(req: NextRequest) {
         answer: "これはSupabase接続テストです",
       });
 
-    if (insertError) throw new Error("Supabase insert error: " + insertError.message);
+    if (insertError) {
+      console.error("Supabase insert error:", insertError);
+      return NextResponse.json(
+        { error: "Supabase insert failed", details: insertError.message },
+        { status: 500 }
+      );
+    }
 
-    // 5) OpenAI
+    // ③ OpenAIへ
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
-        { role: "system", content: "あなたは中学受験算数のプロ講師です。" },
+        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: message },
       ],
     });
 
     const reply =
-      completion.choices[0]?.message?.content ?? "すみません、うまく回答できませんでした。";
+      completion.choices?.[0]?.message?.content ??
+      "すみません、うまく回答できませんでした。";
 
+    // ④ 最後に1回だけreturn（フロントが期待してるのは reply ）
     return NextResponse.json({ reply });
   } catch (e: any) {
-    console.error("API ERROR:", e);
+    console.error("API Error:", e);
     return NextResponse.json(
-      { error: String(e?.message ?? e) },
+      { error: "Server error", details: e?.message ?? String(e) },
       { status: 500 }
     );
   }
