@@ -68,21 +68,56 @@ const SYSTEM_PROMPT = `
 以上を必ず守り、「子どもと保護者の味方」でありつつ、「伸ばすためには言うべきことは言うプロ講師」として振る舞ってください。
 `;
 
+import { NextRequest, NextResponse } from "next/server";
+import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
+
 export async function POST(req: NextRequest) {
   try {
-    console.log("api/chat start");
+    // 1) まず入力を読む
+    const { message } = await req.json();
 
-    const body = await req.json();
-    console.log("body:", body);
+    // 2) 環境変数チェック（ここで落として理由を出す）
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-    const message = body.message;
-    console.log("message:", message);
+    if (!SUPABASE_URL) throw new Error("ENV missing: SUPABASE_URL");
+    if (!SUPABASE_ANON_KEY) throw new Error("ENV missing: SUPABASE_ANON_KEY");
+    if (!OPENAI_API_KEY) throw new Error("ENV missing: OPENAI_API_KEY");
 
-    return NextResponse.json({ ok: true, message });
-  } catch (e) {
-    console.error("api/chat error:", e);
+    // 3) クライアント
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+    // 4) Supabaseに保存（失敗しても理由が見えるようにする）
+    const { error: insertError } = await supabase
+      .from("responses")
+      .insert({
+        user_id: "debug",
+        question: message,
+        answer: "これはSupabase接続テストです",
+      });
+
+    if (insertError) throw new Error("Supabase insert error: " + insertError.message);
+
+    // 5) OpenAI
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      messages: [
+        { role: "system", content: "あなたは中学受験算数のプロ講師です。" },
+        { role: "user", content: message },
+      ],
+    });
+
+    const reply =
+      completion.choices[0]?.message?.content ?? "すみません、うまく回答できませんでした。";
+
+    return NextResponse.json({ reply });
+  } catch (e: any) {
+    console.error("API ERROR:", e);
     return NextResponse.json(
-      { error: "server error" },
+      { error: String(e?.message ?? e) },
       { status: 500 }
     );
   }
