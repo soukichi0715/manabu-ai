@@ -2,14 +2,24 @@ import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 
+/* ===============================
+   OpenAI
+================================ */
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: process.env.OPENAI_API_KEY!,
 });
+
+/* ===============================
+   Supabase（Service Role）
+================================ */
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+/* ===============================
+   まなぶ先生AI SYSTEM PROMPT（全文）
+================================ */
 const SYSTEM_PROMPT = `
 あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
 
@@ -25,63 +35,82 @@ const SYSTEM_PROMPT = `
 
 ◆相手の前提（必ず意識する）
 ・中学受験を考えている小学生、またはその保護者。
-・成績や偏差値が安定しない、ケアレスミスが多い、勉強法が分からない、といった悩みを持っている。
+・成績や偏差値が安定しない、ケアレスミスが多い、勉強法が分からない等の悩みを持っている。
 ・質問文から「学年」「志望校レベル」「塾の有無」などが読み取れれば、それを前提に話す。
-・足りない情報が多いときは、最初に 1〜2 個だけ補足質問をしてもよいが、質問に答えつつ「今できるアドバイス」も必ず出す。
+・情報が足りない場合は、最初に1〜2個だけ補足質問をしてよいが、
+　必ず「今できるアドバイス」も同時に出す。
 
 ◆指導スタイル
 1. まず現状を整理して言語化する  
-　・質問文から読み取れる状況を、相手が「そうそう、それ！」と感じるレベルでまとめ直す。  
+2. 複数の原因候補を提示する（Aタイプ／Bタイプなど）  
+3. 原因ごとの具体的対策を出す（行動レベル）  
+4. 思考のプロセスを教える（考え方の手順）  
+5. 最後に前向きな一言を添える（理由付き）
 
-2. 複数の原因候補を提示する  
-　・1つに決めつけず、「Aタイプの原因」「Bタイプの原因」という形で2〜3個に分けて説明する。  
+◆フォーマット
+【1. 今の状況の整理】
+【2. 考えられる原因】
+【3. 今日からできる対策】
+【4. ひとことメッセージ】
 
-3. 原因ごとの具体的な対策を出す  
-　・「今日からできる行動レベル」で書く（ページ数・時間・問題のレベルなどをできるだけ具体的に）。  
-
-4. 思考のプロセスを教える  
-　・すぐに答えを言うのではなく、「こう考えて、次にこう整理してみよう」という“考え方の手順”を示す。  
-
-5. メンタル・声かけ  
-　・最後に、短く前向きな一言を必ず添える。  
-　・ただの励ましだけでなく、「なぜ大丈夫と言えるのか」を1行だけ理由で添える。
-
-◆フォーマットのルール
-・見出しと箇条書きを多用し、次の構成を基本とする：
-
-【1. 今の状況の整理】  
-・
-
-【2. 考えられる原因】  
-・A：  
-・B：  
-
-【3. 今日からできる対策】  
-・
-
-【4. ひとことメッセージ】  
-・
-
-・小学生にはやさしく、保護者には論理的に。それぞれ語り口を自然に切り替える。
-・不安だけを増やさず、「だから、こうすれば大丈夫」という方向性を必ず示す。
-
-以上を必ず守り、「子どもと保護者の味方」でありつつ、「伸ばすためには言うべきことは言うプロ講師」として振る舞ってください。
+以上を必ず守り、
+「子どもと保護者の味方」でありつつ、
+「伸ばすために言うべきことは言うプロ講師」
+として振る舞ってください。
 `;
 
+/* ===============================
+   util
+================================ */
+function jsonError(message: string, status = 400, extra?: any) {
+  return NextResponse.json({ ok: false, message, ...extra }, { status });
+}
+
+/* ===============================
+   POST /api/chat
+================================ */
 export async function POST(req: NextRequest) {
-  const { message } = await req.json();
-
-  // ①（任意）Supabaseに保存（失敗しても落とさない）
+  /* -------- ① JSONを安全に読む -------- */
+  let body: any;
   try {
-    await supabase.from("responses").insert([{
-      user_id: "debug",
-      test_id: "ed9ba4f3-fdca-48a7-9d1e-6287cf505c98",
-      question: message,
-      answer: "保存テスト",
-  }]);
-  } catch (e) {}
+    body = await req.json();
+  } catch {
+    return jsonError("Invalid JSON body");
+  }
 
-  // ② OpenAI
+  const message =
+    typeof body?.message === "string" ? body.message.trim() : "";
+
+  if (!message) {
+    return jsonError("message is required");
+  }
+
+  /* -------- ② Supabase用データ（本番補完） -------- */
+  const insertRow = {
+    user_id: body?.user_id ?? "web",
+    test_id: body?.test_id ?? "ed9ba4f3-fdca-48a7-9d1e-6287cf505c98",
+    subject: body?.subject ?? "未分類",               // NOT NULL
+    qid: body?.qid ?? `web-${crypto.randomUUID()}`,   // NOT NULL
+    is_correct: false,                                // NOT NULL
+    question: message,
+    answer: null,
+  };
+
+  /* -------- ③ Supabase insert -------- */
+  const { data, error } = await supabase
+    .from("responses")
+    .insert([insertRow])
+    .select();
+
+  if (error) {
+    console.error("Supabase insert error:", error);
+    return NextResponse.json(
+      { ok: false, where: "supabase_insert", error },
+      { status: 500 }
+    );
+  }
+
+  /* -------- ④ OpenAI（まなぶ先生AI） -------- */
   const completion = await openai.chat.completions.create({
     model: "gpt-4.1-mini",
     messages: [
@@ -91,8 +120,19 @@ export async function POST(req: NextRequest) {
   });
 
   const reply =
-    completion.choices[0]?.message?.content ?? "すみません、うまく回答できませんでした。";
+    completion.choices[0]?.message?.content ??
+    "ごめんね、うまく整理できなかった。もう一度教えて。";
 
-  // ③ 最後のreturnはこれ1個だけ
-  return NextResponse.json({ reply });
+  await supabase
+    .from("responses")
+    .update({ answer: reply })
+    .eq("id", data?.[0]?.id);
+    
+  /* -------- ⑤ 返却 -------- */
+  return NextResponse.json({
+    ok: true,
+    reply,
+    log_id: data?.[0]?.id,
+    received: body, // ★追加：Webから何が届いたか確認用（デバッグが終わったら消す）
+  });
 }
