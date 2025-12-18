@@ -6,8 +6,8 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
 const SYSTEM_PROMPT = `
@@ -73,12 +73,12 @@ export async function POST(req: NextRequest) {
 
   // ①（任意）Supabaseに保存（失敗しても落とさない）
   try {
-    await supabase.from("responses").insert([
+    await supabase.from("responses").insert({
       user_id: "debug",
-      test_id: "debug-test",
+      test_id: "ed9ba4f3-fdca-48a7-9d1e-6287cf505c98",
       question: message,
       answer: "保存テスト",
-    ]);
+  });
   } catch (e) {}
 
   // ② OpenAI
