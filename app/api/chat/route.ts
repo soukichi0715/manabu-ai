@@ -73,12 +73,12 @@ export async function POST(req: NextRequest) {
 
   // ①（任意）Supabaseに保存（失敗しても落とさない）
   try {
-    await supabase.from("responses").insert({
+    await supabase.from("responses").insert([{
       user_id: "debug",
       test_id: "ed9ba4f3-fdca-48a7-9d1e-6287cf505c98",
       question: message,
       answer: "保存テスト",
-  });
+  }]);
   } catch (e) {}
 
   // ② OpenAI
