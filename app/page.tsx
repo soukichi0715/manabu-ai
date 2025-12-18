@@ -7,18 +7,35 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
 };
-
+type Mode = "consult" | "analyze";
 export default function Home() {
   const [input, setInput] = useState("");
+const [mode, setMode] = useState<Mode>("consult");
+const [deviceId, setDeviceId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
+function getOrCreateDeviceId() {
+  const key = "manabu_device_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `dev-${Date.now()}`;
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
   // メッセージが増えたら一番下までスクロール
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+useEffect(() => {
+  setDeviceId(getOrCreateDeviceId());
+}, []);
 
   // 成績表ファイル選択時
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
@@ -55,17 +72,17 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userMessage.content,
-          subject: "算数",                 // ←入れたい科目
-          qid:
-      typeof crypto !== "undefined" && crypto.randomUUID
-        ? `web-${crypto.randomUUID()}`
-        : `web-${Date.now()}`,
-          user_id: "web", // TODO: auth導入後に差し替え
-       // test_id: "..."                // ←必要なら
- }),
-      });
+body: JSON.stringify({
+  mode,                       // ★追加：相談/分析
+  message: userMessage.content,
+  subject: "算数",
+  qid:
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? `web-${crypto.randomUUID()}`
+      : `web-${Date.now()}`,
+  user_id: deviceId || "web", // ★変更：端末ID（ログインなし）
+  // test_id: "..."           // 必要なら
+}),      });
 
       const data = await res.json();
       
@@ -129,8 +146,38 @@ export default function Home() {
               中学受験算数の相談をなんでもどうぞ。質問を送ると、まなぶ先生AIが
               「優しさ7：厳しさ3」でアドバイスします。
             </p>
-          </header>
+{/* モード切替 */}
+<div className="mt-2 flex items-center gap-2">
+  <button
+    type="button"
+    onClick={() => setMode("consult")}
+    className={`px-3 py-1 rounded-lg border text-xs md:text-sm ${
+      mode === "consult"
+        ? "bg-slate-900 text-white border-slate-900"
+        : "bg-white text-slate-700 border-slate-300"
+    }`}
+  >
+    相談モード
+  </button>
 
+  <button
+    type="button"
+    onClick={() => setMode("analyze")}
+    className={`px-3 py-1 rounded-lg border text-xs md:text-sm ${
+      mode === "analyze"
+        ? "bg-slate-900 text-white border-slate-900"
+        : "bg-white text-slate-700 border-slate-300"
+    }`}
+  >
+    分析モード
+  </button>
+
+  <span className="ml-auto text-[10px] md:text-xs text-slate-400">
+    ID: {deviceId ? deviceId.slice(0, 8) + "…" : "生成中…"}
+  </span>
+</div>
+
+          </header>
           {/* 成績表アップロードバー */}
           <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex flex-col md:flex-row gap-2 md:items-center">
             <label className="text-xs md:text-sm text-slate-700 font-semibold">
@@ -259,7 +306,7 @@ export default function Home() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !deviceId}
               className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs md:text-sm font-semibold disabled:bg-slate-400 disabled:cursor-not-allowed shadow-sm"
             >
               {loading ? "送信中…" : "送信"}
