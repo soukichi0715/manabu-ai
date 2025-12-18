@@ -55,10 +55,23 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage.content }),
+        body: JSON.stringify({
+          message: userMessage.content,
+          subject: "算数",                 // ←入れたい科目
+          qid:
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? `web-${crypto.randomUUID()}`
+        : `web-${Date.now()}`,
+          user_id: "web", // TODO: auth導入後に差し替え
+       // test_id: "..."                // ←必要なら
+ }),
       });
 
       const data = await res.json();
+      
+      if (!res.ok || !data.ok) {
+          throw new Error(data?.message ?? "API error");
+}
       const replyText: string = data.reply ?? "エラーが発生しました。";
 
       const assistantMessage: ChatMessage = {
