@@ -2,73 +2,61 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 
 export default function TeacherLoginPage() {
   const router = useRouter();
-  const supabase = createClient();
-
-  const [loginId, setLoginId] = useState("");
+  const [id, setId] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setLoading(true);
-    setError("");
+    setErr(null);
 
-    const email = `${loginId}@manabu.local`;
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+    const r = await fetch("/api/login/teacher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, password }),
     });
 
-    if (error) {
-      setError("ログイン情報が正しくありません");
-      setLoading(false);
+    setLoading(false);
+
+    if (!r.ok) {
+      setErr("IDまたはパスワードが違います");
       return;
     }
 
-    router.push("/analyze");
-  };
+    router.replace("/analyze");
+  }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="w-full max-w-sm bg-white p-6 rounded-xl shadow">
-        <h1 className="text-lg font-bold mb-4">講師ログイン</h1>
-
-        <div className="space-y-4">
-          <input
-            type="text"
-            placeholder="ログインID"
-            value={loginId}
-            onChange={(e) => setLoginId(e.target.value)}
-            className="w-full border px-3 py-2 rounded-md"
-          />
-
+    <div style={{ maxWidth: 420, margin: "80px auto" }}>
+      <h2>講師ログイン</h2>
+      <form onSubmit={onSubmit}>
+        <div style={{ marginTop: 12 }}>
+          <label>ID</label>
+          <input value={id} onChange={(e) => setId(e.target.value)} style={{ width: "100%" }} />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label>パスワード</label>
           <input
             type="password"
-            placeholder="パスワード"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full border px-3 py-2 rounded-md"
+            style={{ width: "100%" }}
           />
-
-          {error && (
-            <p className="text-sm text-red-600">{error}</p>
-          )}
-
-          <button
-            onClick={handleLogin}
-            disabled={loading}
-            className="w-full bg-gray-800 text-white py-2 rounded-md disabled:opacity-50"
-          >
-            {loading ? "ログインしています…" : "ログイン"}
-          </button>
         </div>
-      </div>
+
+        {err && <p style={{ color: "red", marginTop: 12 }}>{err}</p>}
+
+        <button disabled={loading} style={{ marginTop: 16, width: "100%" }}>
+          {loading ? "ログイン中..." : "ログイン"}
+        </button>
+      </form>
+
+      <p style={{ marginTop: 12, color: "#666" }}>（デモ用：test / test）</p>
     </div>
   );
 }
-
