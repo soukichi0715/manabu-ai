@@ -22,7 +22,7 @@ export default function TeacherLoginPage() {
     });
 
     setLoading(false);
-
+  
     if (!r.ok) {
       setErr("IDまたはパスワードが違います");
       return;
