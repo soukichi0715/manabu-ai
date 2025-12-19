@@ -37,16 +37,24 @@ export default function TeacherLoginPage() {
       <form onSubmit={onSubmit}>
         <div style={{ marginTop: 12 }}>
           <label>ID</label>
-          <input value={id} onChange={(e) => setId(e.target.value)} style={{ width: "100%" }} />
+          <input
+  value={id}
+  onChange={(e) => setId(e.target.value)}
+  placeholder="講師ID"
+  style={inputStyle}
+/>
+
         </div>
         <div style={{ marginTop: 12 }}>
           <label>パスワード</label>
           <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            style={{ width: "100%" }}
-          />
+  type="password"
+  value={password}
+  onChange={(e) => setPassword(e.target.value)}
+  placeholder="パスワード"
+  style={inputStyle}
+/>
+
         </div>
 
         {err && <p style={{ color: "red", marginTop: 12 }}>{err}</p>}

@@ -176,3 +176,12 @@ const legendStyle: React.CSSProperties = {
   fontWeight: "bold",
   fontSize: 14,
 };
+
+const buttonStyle: React.CSSProperties = {
+  display: "inline-block",
+  padding: "10px 16px",
+  background: "#e5e7eb",
+  borderRadius: 6,
+  cursor: "pointer",
+  fontSize: 14,
+};
