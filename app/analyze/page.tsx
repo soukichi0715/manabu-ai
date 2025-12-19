@@ -1,112 +1,178 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+/**
+ * 分析モード（講師用）
+ * ・単発テスト／年間推移の2アップロード
+ * ・講師の視点選択（トーン・ミス傾向など）
+ * ・MVP段階ではUI確定を最優先
+ */
 export default async function AnalyzePage() {
+  // --- 講師ログインチェック ---
   const cookieName = process.env.TEACHER_LOGIN_COOKIE ?? "teacher_session";
-  const has = (await cookies()).get(cookieName)?.value;
-
-  if (!has) redirect("/login/teacher");
+  const hasSession = (await cookies()).get(cookieName)?.value;
+  if (!hasSession) redirect("/login/teacher");
 
   return (
-    <div style={{ maxWidth: 980, margin: "40px auto", padding: "0 16px" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <h1 style={{ fontSize: 24, margin: 0 }}>分析モード</h1>
-          <p style={{ margin: "8px 0 0", color: "#666" }}>
-            成績PDF（スキャン）を読み込み、課題と次の打ち手を自動で整理します
-          </p>
-        </div>
-        <a href="/login" style={{ color: "#666", textDecoration: "underline" }}>
-          ログイン選択へ
-        </a>
+    <div style={{ maxWidth: 1000, margin: "40px auto", padding: "0 16px" }}>
+      {/* =====================
+          ヘッダー
+      ===================== */}
+      <header style={{ marginBottom: 32 }}>
+        <h1 style={{ fontSize: 26, marginBottom: 8 }}>分析モード</h1>
+        <p style={{ color: "#555" }}>
+          成績データと講師の視点をもとに、課題と次の打ち手を整理します。
+        </p>
       </header>
 
-      {/* ① アップロード */}
-      <section style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>PDFアップロード</h2>
-        <p style={{ margin: "8px 0 12px", color: "#666" }}>
-          例：育成テスト／公開模試の成績表（PDF）
-        </p>
+      {/* =====================
+          ① 成績データのアップロード
+      ===================== */}
+      <section style={sectionStyle}>
+        <h2 style={sectionTitle}>① 成績データのアップロード</h2>
 
-        <div
+        {/* 単発テスト */}
+        <div style={boxStyle}>
+          <h3 style={boxTitle}>今回のテスト（単発分析）</h3>
+          <p style={boxDesc}>
+            育成テスト・公開模試など、1回分の成績表PDF
+          </p>
+          <input type="file" accept="application/pdf" />
+        </div>
+
+        {/* 年間推移 */}
+        <div style={{ ...boxStyle, marginTop: 16 }}>
+          <h3 style={boxTitle}>1年分の成績（推移分析）</h3>
+          <p style={boxDesc}>
+            過去1年分の成績表PDFをまとめてアップロード
+          </p>
+          <input type="file" accept="application/pdf" multiple />
+        </div>
+      </section>
+
+      {/* =====================
+          ② 講師の視点・選択肢
+      ===================== */}
+      <section style={sectionStyle}>
+        <h2 style={sectionTitle}>② 講師の視点設定</h2>
+
+        {/* 分析スタンス */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>分析スタンス（トーン）</legend>
+          <label><input type="radio" name="tone" /> 厳しめ</label><br />
+          <label><input type="radio" name="tone" defaultChecked /> バランス</label><br />
+          <label><input type="radio" name="tone" /> 励まし重視</label>
+        </fieldset>
+
+        {/* 指導視点 */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>指導視点（原因の置き所）</legend>
+          <label><input type="radio" name="focus" /> 本人要因</label><br />
+          <label><input type="radio" name="focus" defaultChecked /> 学習方法</label><br />
+          <label><input type="radio" name="focus" /> 環境要因</label>
+        </fieldset>
+
+        {/* 時間軸 */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>合格戦略（時間軸）</legend>
+          <label><input type="radio" name="term" /> 短期（次回テスト）</label><br />
+          <label><input type="radio" name="term" defaultChecked /> 中期（学期・講習）</label><br />
+          <label><input type="radio" name="term" /> 長期（入試逆算）</label>
+        </fieldset>
+
+        {/* ミス傾向 */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>ミス傾向（複数選択）</legend>
+          <label><input type="checkbox" /> 計算ミス</label><br />
+          <label><input type="checkbox" /> 条件整理ミス</label><br />
+          <label><input type="checkbox" /> 読み違い</label><br />
+          <label><input type="checkbox" /> 立式ミス</label><br />
+          <label><input type="checkbox" /> 時間配分ミス</label><br />
+          <label><input type="checkbox" /> ケアレス混在</label>
+        </fieldset>
+
+        {/* 介入レベル */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>介入レベル</legend>
+          <label><input type="radio" name="intervention" /> 最小</label><br />
+          <label><input type="radio" name="intervention" defaultChecked /> 標準</label><br />
+          <label><input type="radio" name="intervention" /> 徹底</label>
+        </fieldset>
+
+        {/* 出力対象 */}
+        <fieldset style={fieldSetStyle}>
+          <legend style={legendStyle}>出力対象</legend>
+          <label><input type="checkbox" defaultChecked /> 講師用</label><br />
+          <label><input type="checkbox" defaultChecked /> 保護者用</label><br />
+          <label><input type="checkbox" /> 生徒用</label><br />
+          <label><input type="checkbox" /> 面談用まとめ</label>
+        </fieldset>
+      </section>
+
+      {/* =====================
+          ③ 実行
+      ===================== */}
+      <section style={{ marginTop: 32, textAlign: "center" }}>
+        <button
           style={{
-            border: "2px dashed #bbb",
-            borderRadius: 12,
-            padding: 24,
-            textAlign: "center",
-            color: "#666",
-            background: "#fafafa",
+            padding: "14px 28px",
+            fontSize: 16,
+            background: "#2563eb",
+            color: "#fff",
+            border: "none",
+            borderRadius: 8,
+            cursor: "pointer",
           }}
         >
-          ここにPDFをドラッグ＆ドロップ<br />
-          または <button style={{ marginTop: 12 }}>ファイルを選択</button>
-        </div>
-
-        <p style={{ marginTop: 12, fontSize: 12, color: "#888" }}>
-          ※MVPではまず1種類のPDF形式から対応します（順次拡張）
-        </p>
-      </section>
-
-      {/* ② 解析履歴 */}
-      <section style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>解析履歴（デモ）</h2>
-
-        <table style={{ width: "100%", marginTop: 12, borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", color: "#666" }}>
-              <th style={{ padding: 8, borderBottom: "1px solid #eee" }}>日時</th>
-              <th style={{ padding: 8, borderBottom: "1px solid #eee" }}>生徒ID</th>
-              <th style={{ padding: 8, borderBottom: "1px solid #eee" }}>種別</th>
-              <th style={{ padding: 8, borderBottom: "1px solid #eee" }}>状態</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>2025/12/19 21:10</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>S123456</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>育成テスト</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>完了</td>
-            </tr>
-            <tr>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>2025/12/19 20:30</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>S999001</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>公開模試</td>
-              <td style={{ padding: 8, borderBottom: "1px solid #f2f2f2" }}>解析中</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      {/* ③ 結果プレビュー */}
-      <section style={{ marginTop: 24, padding: 16, border: "1px solid #ddd", borderRadius: 12 }}>
-        <h2 style={{ fontSize: 16, margin: 0 }}>解析結果プレビュー（デモ）</h2>
-        <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
-          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
-            <strong>今回の要点</strong>
-            <ul style={{ margin: "8px 0 0" }}>
-              <li>計算は安定、文章題で条件整理ミスが多い</li>
-              <li>割合（基準量の切替）で失点が集中</li>
-            </ul>
-          </div>
-
-          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
-            <strong>次回までの優先課題（Top3）</strong>
-            <ol style={{ margin: "8px 0 0" }}>
-              <li>割合：基準量の書き分け（線分図テンプレ）</li>
-              <li>文章題：問い→条件→式 の順番固定</li>
-              <li>計算：符号/単位の見直しチェック導入</li>
-            </ol>
-          </div>
-
-          <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 10 }}>
-            <strong>保護者への一言（自動生成・デモ）</strong>
-            <p style={{ margin: "8px 0 0", color: "#333" }}>
-              今回は「条件整理」が原因の失点が目立ちました。解き方の知識というより、
-              文章題の読み取り順を固定すると安定します。次回は割合の“基準量”の書き分けを最優先にします。
-            </p>
-          </div>
-        </div>
+          この設定で分析する
+        </button>
       </section>
     </div>
   );
 }
+
+/* =====================
+   スタイル定義
+===================== */
+
+const sectionStyle: React.CSSProperties = {
+  marginTop: 32,
+  padding: 20,
+  border: "1px solid #ddd",
+  borderRadius: 12,
+};
+
+const sectionTitle: React.CSSProperties = {
+  fontSize: 18,
+  marginBottom: 16,
+};
+
+const boxStyle: React.CSSProperties = {
+  padding: 16,
+  border: "1px solid #ccc",
+  borderRadius: 10,
+  background: "#fafafa",
+};
+
+const boxTitle: React.CSSProperties = {
+  fontSize: 15,
+  marginBottom: 4,
+};
+
+const boxDesc: React.CSSProperties = {
+  fontSize: 13,
+  color: "#666",
+  marginBottom: 8,
+};
+
+const fieldSetStyle: React.CSSProperties = {
+  marginTop: 16,
+  padding: 12,
+  border: "1px solid #ccc",
+  borderRadius: 8,
+};
+
+const legendStyle: React.CSSProperties = {
+  fontWeight: "bold",
+  fontSize: 14,
+};
