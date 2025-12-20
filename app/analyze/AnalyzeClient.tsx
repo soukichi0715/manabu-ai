@@ -37,10 +37,7 @@ export default function AnalyzeClient() {
   }
 
   /** UI表示用：ファイル名一覧 */
-  const singleFileNames = useMemo(
-    () => singleFiles.map((f) => f.name),
-    [singleFiles]
-  );
+  const singleFileNames = useMemo(() => singleFiles.map((f) => f.name), [singleFiles]);
 
   /* =========================
      File handlers
@@ -57,10 +54,8 @@ export default function AnalyzeClient() {
     const picked = Array.from(files ?? []);
     if (picked.length === 0) return;
 
-    // 既存 + 追加（同名重複は許容。嫌ならここで弾ける）
     setSingleFiles((prev) => [...prev, ...picked]);
 
-    // 同じファイルをもう一回選べるよう input をリセット
     if (singleInputRef.current) singleInputRef.current.value = "";
   }
 
@@ -231,11 +226,7 @@ export default function AnalyzeClient() {
             </div>
           </div>
 
-          {yearlyFile ? (
-            <p style={fileInfo}>選択中：{yearlyFile.name}</p>
-          ) : (
-            <p style={hint}>未選択</p>
-          )}
+          {yearlyFile ? <p style={fileInfo}>選択中：{yearlyFile.name}</p> : <p style={hint}>未選択</p>}
         </div>
       </section>
 
@@ -247,32 +238,17 @@ export default function AnalyzeClient() {
         <div style={boxStyle}>
           <h3>指導トーン</h3>
           <label>
-            <input
-              type="radio"
-              name="tone"
-              checked={tone === "gentle"}
-              onChange={() => setTone("gentle")}
-            />
+            <input type="radio" name="tone" checked={tone === "gentle"} onChange={() => setTone("gentle")} />
             やさしく寄り添う
           </label>
           <br />
           <label>
-            <input
-              type="radio"
-              name="tone"
-              checked={tone === "balanced"}
-              onChange={() => setTone("balanced")}
-            />
+            <input type="radio" name="tone" checked={tone === "balanced"} onChange={() => setTone("balanced")} />
             バランス型（標準）
           </label>
           <br />
           <label>
-            <input
-              type="radio"
-              name="tone"
-              checked={tone === "strict"}
-              onChange={() => setTone("strict")}
-            />
+            <input type="radio" name="tone" checked={tone === "strict"} onChange={() => setTone("strict")} />
             厳しめに課題を明確化
           </label>
         </div>
@@ -326,40 +302,19 @@ export default function AnalyzeClient() {
           <h3>出力対象（1つ選択）</h3>
 
           <label>
-            <input
-              type="radio"
-              name="target"
-              checked={target === "student"}
-              onChange={() => setTarget("student")}
-            />
+            <input type="radio" name="target" checked={target === "student"} onChange={() => setTarget("student")} />
             生徒向け
           </label>
           <br />
-
           <label>
-            <input
-              type="radio"
-              name="target"
-              checked={target === "parent"}
-              onChange={() => setTarget("parent")}
-            />
+            <input type="radio" name="target" checked={target === "parent"} onChange={() => setTarget("parent")} />
             保護者向け
           </label>
           <br />
-
           <label>
-            <input
-              type="radio"
-              name="target"
-              checked={target === "teacher"}
-              onChange={() => setTarget("teacher")}
-            />
+            <input type="radio" name="target" checked={target === "teacher"} onChange={() => setTarget("teacher")} />
             講師用（指導メモ）
           </label>
-
-          <p style={{ ...hint, marginTop: 10 }}>
-            ※ APIには <code>target</code> を単一文字列で送ります（例："parent"）。
-          </p>
         </div>
       </section>
 
@@ -377,12 +332,7 @@ export default function AnalyzeClient() {
           {loading ? "分析中…" : "この設定で分析する"}
         </button>
 
-        {!canRun && (
-          <p style={{ ...hint, marginTop: 10 }}>
-            単発PDFまたは年間PDFを選択してください。
-          </p>
-        )}
-
+        {!canRun && <p style={{ ...hint, marginTop: 10 }}>単発PDFまたは年間PDFを選択してください。</p>}
         {error && <p style={{ color: "crimson", marginTop: 12 }}>{error}</p>}
       </div>
 
@@ -394,19 +344,39 @@ export default function AnalyzeClient() {
 
           {result.ocr?.note && <p>{result.ocr.note}</p>}
 
+          {/* ★追加：年間 成績表判定 */}
+          {result.ocr?.yearlyGradeCheck && (
+            <div style={{ marginTop: 12 }}>
+              <h3>年間PDF：成績表判定</h3>
+              <p>
+                判定：<b>{result.ocr.yearlyGradeCheck.isGradeReport ? "成績表っぽい ✅" : "成績表ではなさそう ❌"}</b>{" "}
+                （信頼度 {result.ocr.yearlyGradeCheck.confidence}）
+              </p>
+              <p style={hint}>理由：{result.ocr.yearlyGradeCheck.reason}</p>
+            </div>
+          )}
+
           {result.ocr?.singles && (
             <>
-              <h3>単発テスト OCR結果</h3>
+              <h3 style={{ marginTop: 20 }}>単発テスト OCR結果</h3>
+
               {result.ocr.singles.map((r: any, i: number) => (
                 <div key={i} style={{ marginBottom: 20 }}>
                   <b>
                     {r.ok ? "✅" : "❌"} {r.name}
                   </b>
-                  {r.ok ? (
-                    <pre style={preStyle}>{r.text}</pre>
-                  ) : (
-                    <div style={{ color: "crimson" }}>{r.error}</div>
+
+                  {/* ★追加：単発 成績表判定 */}
+                  {r.gradeCheck && (
+                    <div style={{ marginTop: 6 }}>
+                      判定：{" "}
+                      <b>{r.gradeCheck.isGradeReport ? "成績表っぽい ✅" : "成績表ではなさそう ❌"}</b>{" "}
+                      （信頼度 {r.gradeCheck.confidence}）
+                      <div style={hint}>理由：{r.gradeCheck.reason}</div>
+                    </div>
                   )}
+
+                  {r.ok ? <pre style={preStyle}>{r.text}</pre> : <div style={{ color: "crimson" }}>{r.error}</div>}
                 </div>
               ))}
             </>
@@ -419,7 +389,6 @@ export default function AnalyzeClient() {
             </>
           )}
 
-          {/* デバッグ：送信した設定を見たい時用（APIが返すなら） */}
           {result.selections && (
             <>
               <h3>（デバッグ）選択設定</h3>
@@ -494,6 +463,7 @@ const preStyle: React.CSSProperties = {
   background: "#f7f7f7",
   padding: 12,
   borderRadius: 8,
+  marginTop: 10,
 };
 
 const hint: React.CSSProperties = {
@@ -506,4 +476,3 @@ const fileInfo: React.CSSProperties = {
   color: "#333",
   marginTop: 6,
 };
-
