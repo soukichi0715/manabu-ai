@@ -37,7 +37,17 @@ export default async function AnalyzePage() {
           <p style={boxDesc}>
             育成テスト・公開模試など、1回分の成績表PDF
           </p>
-          <input type="file" accept="application/pdf" />
+          <input
+  id="singleTestPdf"
+  type="file"
+  accept="application/pdf"
+  style={{ display: "none" }}
+/>
+
+<label htmlFor="singleTestPdf" style={buttonStyle}>
+  PDFを選択
+</label>
+
         </div>
 
         {/* 年間推移 */}
@@ -46,7 +56,18 @@ export default async function AnalyzePage() {
           <p style={boxDesc}>
             過去1年分の成績表PDFをまとめてアップロード
           </p>
-          <input type="file" accept="application/pdf" multiple />
+         <input
+  id="yearlyPdf"
+  type="file"
+  accept="application/pdf"
+  multiple
+  style={{ display: "none" }}
+/>
+
+<label htmlFor="yearlyPdf" style={buttonStyle}>
+  PDFをまとめて選択
+</label>
+
         </div>
       </section>
 

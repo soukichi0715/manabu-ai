@@ -36,7 +36,9 @@ export default function TeacherLoginPage() {
       <h2>講師ログイン</h2>
       <form onSubmit={onSubmit}>
         <div style={{ marginTop: 12 }}>
-          <label>ID</label>
+          <label style={{ fontSize: 13, color: "#555", display: "block", marginBottom: 4 }}>
+  講師ID
+</label>
           <input
   value={id}
   onChange={(e) => setId(e.target.value)}
@@ -46,7 +48,9 @@ export default function TeacherLoginPage() {
 
         </div>
         <div style={{ marginTop: 12 }}>
-          <label>パスワード</label>
+          <label style={{ fontSize: 13, color: "#555", display: "block", marginBottom: 4 }}>
+  パスワード
+</label>
           <input
   type="password"
   value={password}
@@ -68,3 +72,11 @@ export default function TeacherLoginPage() {
     </div>
   );
 }
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "10px 12px",
+  border: "1px solid #ccc",
+  borderRadius: 6,
+  fontSize: 14,
+  boxSizing: "border-box",
+};
