@@ -12,7 +12,7 @@
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.87.3",
     "next": "16.0.8",
-    "openai": "^6.10.0",
+    "openai": "^6.15.0",
     "react": "19.2.1",
     "react-dom": "19.2.1"
   },
