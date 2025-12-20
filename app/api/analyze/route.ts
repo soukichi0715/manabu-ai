@@ -107,7 +107,10 @@ async function judgeGradeReport(params: {
           "\n\n" +
           "OCRテキスト（先頭抜粋）:\n" +
           snippet +
-          "\n\n" +
+          "※重要：次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』があるもの。\n" +
+"それらが見えたら isGradeReport=false にしてください。\n" +
+"成績表の根拠は『偏差値』『順位』『平均点』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n" +
+"\n\n" +
           "これが『成績表（模試・テスト結果・成績推移）』に該当するかを判定し、必ず次のJSONのみを返してください。\n" +
           '{ "isGradeReport": boolean, "confidence": number, "reason": string }\n' +
           "confidenceは0〜100。reasonは1〜2文で、根拠語を含めてください。",
