@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// supabase-js を使うので Node runtime を明示（Vercelで安定）
 export const runtime = "nodejs";
 
 const supabase = createClient(
@@ -9,7 +8,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { persistSession: false } }
 );
-const baseDir = `analyze/${crypto.randomUUID()}`; // ←ここだけでOK
+
 function safeName(name: string) {
   return name.replace(/[^\w.\-()]+/g, "_");
 }
@@ -43,16 +42,29 @@ export async function POST(req: NextRequest) {
 
     const uploadedSingle = single instanceof File ? await upload(single) : undefined;
 
+    // 年間
     const uploadedYearly: { path: string; name: string; size: number }[] = [];
     for (const v of yearly) {
       if (v instanceof File) uploadedYearly.push(await upload(v));
     }
 
-    // MVP：仮結果
+    // 署名付きURL（単発があるときだけ）
+    let singleSignedUrl: string | null = null;
+    if (uploadedSingle) {
+      const { data, error } = await supabase
+        .storage.from(bucket)
+        .createSignedUrl(uploadedSingle.path, 60 * 10);
+
+      if (!error) singleSignedUrl = data.signedUrl;
+    }
+
     return NextResponse.json({
       summary: `【MVP結果】単発=${uploadedSingle ? "あり" : "なし"} / 年間=${uploadedYearly.length}件`,
       nextActions: ["次はPDFの中身抽出を実装して実分析へ"],
-      files: { single: uploadedSingle, yearly: uploadedYearly },
+      files: {
+        single: uploadedSingle ? { ...uploadedSingle, signedUrl: singleSignedUrl } : null,
+        yearly: uploadedYearly,
+      },
       selections: {},
     });
   } catch (e: any) {
