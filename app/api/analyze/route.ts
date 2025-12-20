@@ -10,95 +10,44 @@ const supabase = createClient(
   { auth: { persistSession: false } }
 );
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 function safeName(name: string) {
   return name.replace(/[^\w.\-()]+/g, "_");
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const fd = await req.formData();
+/** Supabase上のPDFをOCRしてテキスト化 */
+async function ocrPdfFromStorage(params: {
+  bucket: string;
+  path: string;
+  filename: string;
+}) {
+  const { bucket, path, filename } = params;
 
-    const single = fd.get("single");
-    const yearly = fd.getAll("yearly");
-
-    // selections（フロントから来る想定。来なければデフォルト）
-    const tone = String(fd.get("tone") ?? "balance");
-    const focus = String(fd.get("focus") ?? "method");
-    const term = String(fd.get("term") ?? "mid");
-
-    let missTypes: string[] = [];
-    let targets: string[] = ["coach", "parent"];
-    try {
-      missTypes = JSON.parse(String(fd.get("missTypes") ?? "[]"));
-    } catch {}
-    const intervention = String(fd.get("intervention") ?? "std");
-    try {
-      targets = JSON.parse(String(fd.get("targets") ?? '["coach","parent"]'));
-    } catch {}
-
-    if (!(single instanceof File) && yearly.length === 0) {
-      return new NextResponse("PDFがありません。", { status: 400 });
-    }
-
-    const bucket = process.env.SUPABASE_PDF_BUCKET ?? "report-pdfs";
-    const baseDir = `analyze/${crypto.randomUUID()}`;
-
-    async function upload(file: File) {
-      const arrayBuffer = await file.arrayBuffer();
-      const path = `${baseDir}/${safeName(file.name)}`;
-
-      const { error } = await supabase.storage.from(bucket).upload(path, arrayBuffer, {
-        contentType: file.type || "application/pdf",
-        upsert: true,
-      });
-      if (error) throw new Error(`Supabase upload failed: ${error.message}`);
-
-      return { path, name: file.name, size: file.size };
-    }
-
-    // ①アップロード
-    const uploadedSingle = single instanceof File ? await upload(single) : null;
-
-    const uploadedYearly: { path: string; name: string; size: number }[] = [];
-    for (const v of yearly) {
-      if (v instanceof File) uploadedYearly.push(await upload(v));
-    }
-
-    // ②単発の署名URL（デバッグ用：あってもなくてもOK）
-    let singleSignedUrl: string | null = null;
-    if (uploadedSingle) {
-      const { data, error } = await supabase
-        .storage.from(bucket)
-        .createSignedUrl(uploadedSingle.path, 60 * 10);
-      if (!error) singleSignedUrl = data.signedUrl;
-    }
-
-    // ③OCR抽出（まずは単発だけ：年間は後で回す）
-    let extractedText: string | null = null;
-
-    if (uploadedSingle) {
-  // 1) supabase storage からPDFを取得
-  const { data: pdfBlob, error: dlErr } = await supabase.storage
+  // 1) SupabaseからPDF取得
+  const { data: pdfBlob, error } = await supabase.storage
     .from(bucket)
-    .download(uploadedSingle.path);
+    .download(path);
+  if (error || !pdfBlob) {
+    throw new Error(`Supabase download failed: ${error?.message}`);
+  }
 
-  if (dlErr || !pdfBlob) throw new Error(`Supabase download failed: ${dlErr?.message}`);
-
-  // 2) OpenAI Files にアップロードして file_id を作る
-  // Node環境: Blob -> ArrayBuffer -> Buffer
+  // 2) OpenAI Files にアップロード
   const ab = await pdfBlob.arrayBuffer();
   const buf = Buffer.from(ab);
 
   const uploaded = await openai.files.create({
-    file: await OpenAI.toFile(buf, uploadedSingle.name, { type: "application/pdf" }),
+    file: await OpenAI.toFile(buf, filename, {
+      type: "application/pdf",
+    }),
     purpose: "assistants",
   });
 
-  // 3) Responses API に file_id を渡してOCR
+  // 3) OCR
   const resp = await openai.responses.create({
-    model: "gpt-4.1-mini", // まずはここで安定させる（後で上げる）
+    model: "gpt-4.1-mini",
     input: [
       {
         role: "user",
@@ -107,34 +56,100 @@ export async function POST(req: NextRequest) {
           {
             type: "input_text",
             text:
-              "このPDFはスキャン画像の成績表です。OCRして、表の項目名と数値を漏れなくテキスト化してください。判読不能は[判読不能]と書き、推測で埋めないでください。",
+              "このPDFはスキャン画像の成績表です。OCRして、表の項目名と数値を漏れなくテキスト化してください。" +
+              "未記入は「空欄」と書き、推測で埋めないでください。",
           },
         ],
       },
     ],
   });
 
-  extractedText = resp.output_text ?? null;
+  return resp.output_text ?? "";
 }
 
+export async function POST(req: NextRequest) {
+  try {
+    const fd = await req.formData();
 
-    const nextActions = [
-      "OCR結果が出たら、次は『偏差値/得点/単元/正誤』をJSON化して分析ロジックに繋げる",
-      "年間PDFは同様にOCR→集計して、推移（落ち始め/伸びた単元）を出す",
-      "講師選択肢（トーン/対象）で文章の言い方を出し分ける",
-    ];
+    /** 単発：複数枚 */
+    const singleFiles = fd
+      .getAll("single")
+      .filter((v): v is File => v instanceof File);
+
+    /** 年間：1枚 */
+    const yearlyFile = fd.get("yearly");
+    const yearly = yearlyFile instanceof File ? yearlyFile : null;
+
+    if (singleFiles.length === 0 && !yearly) {
+      return new NextResponse("PDFがありません。", { status: 400 });
+    }
+
+    const bucket = process.env.SUPABASE_PDF_BUCKET ?? "report-pdfs";
+    const baseDir = `analyze/${crypto.randomUUID()}`;
+
+    async function upload(file: File) {
+      const ab = await file.arrayBuffer();
+      const path = `${baseDir}/${safeName(file.name)}`;
+
+      const { error } = await supabase.storage.from(bucket).upload(path, ab, {
+        contentType: file.type || "application/pdf",
+        upsert: true,
+      });
+      if (error) throw new Error(error.message);
+
+      return { path, name: file.name, size: file.size };
+    }
+
+    /** アップロード */
+    const uploadedSingles = [];
+    for (const f of singleFiles) uploadedSingles.push(await upload(f));
+
+    const uploadedYearly = yearly ? await upload(yearly) : null;
+
+    /** OCR（Vercel対策で上限） */
+    const MAX_SINGLE_OCR = 5;
+    const singleTargets = uploadedSingles.slice(0, MAX_SINGLE_OCR);
+
+    const singleOcrResults = [];
+    for (const f of singleTargets) {
+      try {
+        const text = await ocrPdfFromStorage({
+          bucket,
+          path: f.path,
+          filename: f.name,
+        });
+        singleOcrResults.push({ ...f, ok: true, text });
+      } catch (e: any) {
+        singleOcrResults.push({
+          ...f,
+          ok: false,
+          error: e?.message ?? "OCR error",
+        });
+      }
+    }
+
+    const yearlyOcrText = uploadedYearly
+      ? await ocrPdfFromStorage({
+          bucket,
+          path: uploadedYearly.path,
+          filename: uploadedYearly.name,
+        })
+      : null;
 
     return NextResponse.json({
-      summary: `【OCR付きMVP】単発=${uploadedSingle ? "あり" : "なし"} / 年間=${uploadedYearly.length}件`,
-      nextActions,
+      summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
       files: {
-        single: uploadedSingle
-          ? { ...uploadedSingle, signedUrl: singleSignedUrl }
-          : null,
+        singles: uploadedSingles,
         yearly: uploadedYearly,
       },
-      selections: { tone, focus, term, missTypes, intervention, targets },
-      extractedText,
+      ocr: {
+        singles: singleOcrResults,
+        yearly: yearlyOcrText,
+        note:
+          uploadedSingles.length > MAX_SINGLE_OCR
+            ? `単発PDFが多いため、先頭${MAX_SINGLE_OCR}枚のみOCRしました`
+            : null,
+      },
     });
   } catch (e: any) {
     return new NextResponse(e?.message ?? "Server error", { status: 500 });
