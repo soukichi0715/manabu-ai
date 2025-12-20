@@ -70,17 +70,16 @@ async function ocrPdfFromStorage(params: {
   return resp.output_text ?? "";
 }
 
-/** OCRテキストから「成績表っぽいか？」判定 */
+/** OCRテキストから「成績表っぽいか？」判定（ハード判定→LLM） */
 async function judgeGradeReport(params: {
   filename: string;
   extractedText: string;
 }) {
   const { filename, extractedText } = params;
 
-  // 長すぎるとコスト＆時間が増えるので、冒頭中心に切る（成績表なら上部に情報が出がち）
-  const snippet = extractedText.slice(0, 3500);
+  // 長すぎるとコスト＆時間が増えるので、冒頭中心に切る
+  const snippet = extractedText.slice(0, 6000);
 
-  // からっぽなら即「不明（false寄り）」扱い
   if (!snippet.trim()) {
     return {
       isGradeReport: false,
@@ -89,6 +88,55 @@ async function judgeGradeReport(params: {
     };
   }
 
+  // -----------------------------
+  // 0) ハード判定（強制false）
+  // -----------------------------
+  const NG_PATTERNS = [
+    /入学試験|入試|選抜|試験問題|問題用紙|問題冊子/,
+    /解答用紙|解答欄|解答用|解答用紙/,
+    /配点|大問|小問|設問|注意事項/,
+    /記入しないこと|記入しない|以下に記入|採点者/,
+  ];
+
+  const hasNg = NG_PATTERNS.some((re) => re.test(snippet));
+  if (hasNg) {
+    return {
+      isGradeReport: false,
+      confidence: 95,
+      reason:
+        "本文に「入試/問題用紙/解答用紙/配点/大問」等の語があり、成績表ではなく試験資料の可能性が高い",
+    };
+  }
+
+  // -----------------------------
+  // 1) 成績表っぽい “肯定根拠” が薄い場合はfalse寄り
+  // -----------------------------
+  const POSITIVE_HINTS = [
+    /偏差値/,
+    /順位/,
+    /平均点|平均との差/,
+    /得点|点数/,
+    /正答率/,
+    /判定|志望校判定/,
+    /成績推移|推移|学習状況/,
+    /科目|国語|算数|理科|社会/,
+  ];
+
+  const posCount = POSITIVE_HINTS.reduce((acc, re) => acc + (re.test(snippet) ? 1 : 0), 0);
+
+  // ここは好みで調整。まずは「2つ未満なら成績表の可能性低い」くらいが安定。
+  if (posCount < 2) {
+    return {
+      isGradeReport: false,
+      confidence: 70,
+      reason:
+        "偏差値/順位/平均点/判定など成績表の典型語が少なく、成績表の根拠が弱い",
+    };
+  }
+
+  // -----------------------------
+  // 2) LLMで最終判定（補助）
+  // -----------------------------
   const resp = await openai.responses.create({
     model: "gpt-4.1-mini",
     input: [
@@ -96,7 +144,7 @@ async function judgeGradeReport(params: {
         role: "system",
         content:
           "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/順位など）』かどうかを判定する担当です。" +
-          "推測しすぎず、本文から根拠を示して判定してください。",
+          "推測しすぎず、本文から根拠語を示して判定してください。",
       },
       {
         role: "user",
@@ -107,10 +155,11 @@ async function judgeGradeReport(params: {
           "\n\n" +
           "OCRテキスト（先頭抜粋）:\n" +
           snippet +
-          "※重要：次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』があるもの。\n" +
-"それらが見えたら isGradeReport=false にしてください。\n" +
-"成績表の根拠は『偏差値』『順位』『平均点』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n" +
-"\n\n" +
+          "\n\n" +
+          "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
+          "これらが本文に含まれる場合は isGradeReport=false にしてください。\n" +
+          "成績表の根拠は『偏差値』『順位』『平均点』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n" +
+          "\n\n" +
           "これが『成績表（模試・テスト結果・成績推移）』に該当するかを判定し、必ず次のJSONのみを返してください。\n" +
           '{ "isGradeReport": boolean, "confidence": number, "reason": string }\n' +
           "confidenceは0〜100。reasonは1〜2文で、根拠語を含めてください。",
@@ -118,18 +167,18 @@ async function judgeGradeReport(params: {
     ],
   });
 
-  // JSONだけ返させてるが、万一崩れた時に備えて保険パース
   const txt = (resp.output_text ?? "").trim();
 
   try {
     const obj = JSON.parse(txt);
     return {
       isGradeReport: Boolean(obj.isGradeReport),
-      confidence: Number.isFinite(obj.confidence) ? Math.max(0, Math.min(100, Number(obj.confidence))) : 50,
+      confidence: Number.isFinite(obj.confidence)
+        ? Math.max(0, Math.min(100, Number(obj.confidence)))
+        : 50,
       reason: typeof obj.reason === "string" ? obj.reason : "理由の取得に失敗しました",
     };
   } catch {
-    // JSONが崩れた場合のフォールバック（最低限）
     return {
       isGradeReport: false,
       confidence: 30,
