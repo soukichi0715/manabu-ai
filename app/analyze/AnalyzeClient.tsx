@@ -7,21 +7,24 @@ type Focus = "self" | "method" | "environment";
 type Term = "short" | "mid" | "long";
 type Intervention = "min" | "std" | "deep";
 
+type UploadedFile = { path: string; name: string; size: number; signedUrl?: string | null };
+
 type AnalyzeResult = {
   summary: string;
   nextActions: string[];
   files: {
-    single?: { path: string; name: string; size: number };
-    yearly: { path: string; name: string; size: number }[];
+    single: UploadedFile | null;
+    yearly: UploadedFile[];
   };
   selections: {
-    tone: Tone;
-    focus: Focus;
-    term: Term;
+    tone: Tone | string;
+    focus: Focus | string;
+    term: Term | string;
     missTypes: string[];
-    intervention: Intervention;
+    intervention: Intervention | string;
     targets: string[];
   };
+  extractedText?: string | null;
 };
 
 export default function AnalyzeClient() {
@@ -40,11 +43,10 @@ export default function AnalyzeClient() {
   const [result, setResult] = useState<AnalyzeResult | null>(null);
 
   const canRun = useMemo(() => {
-    // MVP: 単発か年間のどちらかは必須（両方でもOK）
     return !!singlePdf || yearlyPdfs.length > 0;
   }, [singlePdf, yearlyPdfs]);
 
-  function toggleArray(setter: (v: string[]) => void, current: string[], value: string) {
+  function toggleArray(current: string[], value: string, setter: (v: string[]) => void) {
     if (current.includes(value)) setter(current.filter((x) => x !== value));
     else setter([...current, value]);
   }
@@ -90,7 +92,9 @@ export default function AnalyzeClient() {
     <div style={{ maxWidth: 1000, margin: "40px auto", padding: "0 16px" }}>
       <header style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 26, marginBottom: 8 }}>分析モード</h1>
-        <p style={{ color: "#555" }}>成績データと講師の視点をもとに、課題と次の打ち手を整理します。</p>
+        <p style={{ color: "#555" }}>
+          成績データと講師の視点をもとに、課題と次の打ち手を整理します。
+        </p>
       </header>
 
       {/* ① アップロード */}
@@ -106,10 +110,7 @@ export default function AnalyzeClient() {
             type="file"
             accept="application/pdf"
             style={{ display: "none" }}
-            onChange={(e) => {
-              const f = e.target.files?.[0] ?? null;
-              setSinglePdf(f);
-            }}
+            onChange={(e) => setSinglePdf(e.target.files?.[0] ?? null)}
           />
           <label htmlFor="singleTestPdf" style={buttonStyle}>
             PDFを選択
@@ -130,10 +131,7 @@ export default function AnalyzeClient() {
             accept="application/pdf"
             multiple
             style={{ display: "none" }}
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              setYearlyPdfs(files);
-            }}
+            onChange={(e) => setYearlyPdfs(Array.from(e.target.files ?? []))}
           />
           <label htmlFor="yearlyPdf" style={buttonStyle}>
             PDFをまとめて選択
@@ -151,41 +149,58 @@ export default function AnalyzeClient() {
 
         <fieldset style={fieldSetStyle}>
           <legend style={legendStyle}>分析スタンス（トーン）</legend>
-          <label><input type="radio" name="tone" checked={tone === "strict"} onChange={() => setTone("strict")} /> 厳しめ</label><br />
-          <label><input type="radio" name="tone" checked={tone === "balance"} onChange={() => setTone("balance")} /> バランス</label><br />
-          <label><input type="radio" name="tone" checked={tone === "encourage"} onChange={() => setTone("encourage")} /> 励まし重視</label>
+          <label>
+            <input type="radio" name="tone" checked={tone === "strict"} onChange={() => setTone("strict")} /> 厳しめ
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="tone" checked={tone === "balance"} onChange={() => setTone("balance")} /> バランス
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="tone" checked={tone === "encourage"} onChange={() => setTone("encourage")} /> 励まし重視
+          </label>
         </fieldset>
 
         <fieldset style={fieldSetStyle}>
           <legend style={legendStyle}>指導視点（原因の置き所）</legend>
-          <label><input type="radio" name="focus" checked={focus === "self"} onChange={() => setFocus("self")} /> 本人要因</label><br />
-          <label><input type="radio" name="focus" checked={focus === "method"} onChange={() => setFocus("method")} /> 学習方法</label><br />
-          <label><input type="radio" name="focus" checked={focus === "environment"} onChange={() => setFocus("environment")} /> 環境要因</label>
+          <label>
+            <input type="radio" name="focus" checked={focus === "self"} onChange={() => setFocus("self")} /> 本人要因
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="focus" checked={focus === "method"} onChange={() => setFocus("method")} /> 学習方法
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="focus" checked={focus === "environment"} onChange={() => setFocus("environment")} /> 環境要因
+          </label>
         </fieldset>
 
         <fieldset style={fieldSetStyle}>
           <legend style={legendStyle}>合格戦略（時間軸）</legend>
-          <label><input type="radio" name="term" checked={term === "short"} onChange={() => setTerm("short")} /> 短期（次回テスト）</label><br />
-          <label><input type="radio" name="term" checked={term === "mid"} onChange={() => setTerm("mid")} /> 中期（学期・講習）</label><br />
-          <label><input type="radio" name="term" checked={term === "long"} onChange={() => setTerm("long")} /> 長期（入試逆算）</label>
+          <label>
+            <input type="radio" name="term" checked={term === "short"} onChange={() => setTerm("short")} /> 短期（次回テスト）
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="term" checked={term === "mid"} onChange={() => setTerm("mid")} /> 中期（学期・講習）
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="term" checked={term === "long"} onChange={() => setTerm("long")} /> 長期（入試逆算）
+          </label>
         </fieldset>
 
         <fieldset style={fieldSetStyle}>
           <legend style={legendStyle}>ミス傾向（複数選択）</legend>
-          {[
-            "計算ミス",
-            "条件整理ミス",
-            "読み違い",
-            "立式ミス",
-            "時間配分ミス",
-            "ケアレス混在",
-          ].map((m) => (
+          {["計算ミス", "条件整理ミス", "読み違い", "立式ミス", "時間配分ミス", "ケアレス混在"].map((m) => (
             <React.Fragment key={m}>
               <label>
                 <input
                   type="checkbox"
                   checked={missTypes.includes(m)}
-                  onChange={() => toggleArray(setMissTypes, missTypes, m)}
+                  onChange={() => toggleArray(missTypes, m, setMissTypes)}
                 />{" "}
                 {m}
               </label>
@@ -196,9 +211,17 @@ export default function AnalyzeClient() {
 
         <fieldset style={fieldSetStyle}>
           <legend style={legendStyle}>介入レベル</legend>
-          <label><input type="radio" name="intervention" checked={intervention === "min"} onChange={() => setIntervention("min")} /> 最小</label><br />
-          <label><input type="radio" name="intervention" checked={intervention === "std"} onChange={() => setIntervention("std")} /> 標準</label><br />
-          <label><input type="radio" name="intervention" checked={intervention === "deep"} onChange={() => setIntervention("deep")} /> 徹底</label>
+          <label>
+            <input type="radio" name="intervention" checked={intervention === "min"} onChange={() => setIntervention("min")} /> 最小
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="intervention" checked={intervention === "std"} onChange={() => setIntervention("std")} /> 標準
+          </label>
+          <br />
+          <label>
+            <input type="radio" name="intervention" checked={intervention === "deep"} onChange={() => setIntervention("deep")} /> 徹底
+          </label>
         </fieldset>
 
         <fieldset style={fieldSetStyle}>
@@ -214,7 +237,7 @@ export default function AnalyzeClient() {
                 <input
                   type="checkbox"
                   checked={targets.includes(t.key)}
-                  onChange={() => toggleArray(setTargets, targets, t.key)}
+                  onChange={() => toggleArray(targets, t.key, setTargets)}
                 />{" "}
                 {t.label}
               </label>
@@ -253,15 +276,46 @@ export default function AnalyzeClient() {
 
           <h3 style={{ marginTop: 16, fontSize: 16 }}>次の打ち手</h3>
           <ul>
-            {result.nextActions.map((a, i) => <li key={i}>{a}</li>)}
+            {(result.nextActions ?? []).map((a, i) => (
+              <li key={i}>{a}</li>
+            ))}
           </ul>
 
           <h3 style={{ marginTop: 16, fontSize: 16 }}>アップロード</h3>
           <div style={{ fontSize: 13, color: "#444" }}>
-            単発：{result.files.single ? `${result.files.single.name}（${result.files.single.path}）` : "なし"}
+            単発：
+            {result.files.single
+              ? ` ${result.files.single.name}（${result.files.single.path}）`
+              : " なし"}
+            {result.files.single?.signedUrl ? (
+              <>
+                {" "}
+                /{" "}
+                <a href={result.files.single.signedUrl} target="_blank" rel="noreferrer">
+                  署名URLで開く（10分）
+                </a>
+              </>
+            ) : null}
             <br />
             年間：{result.files.yearly.length}件
           </div>
+
+          {result.extractedText && (
+            <>
+              <h3 style={{ marginTop: 16, fontSize: 16 }}>OCR抽出テキスト</h3>
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  background: "#f7f7f7",
+                  padding: 12,
+                  borderRadius: 8,
+                  border: "1px solid #ddd",
+                }}
+              >
+                {result.extractedText}
+              </pre>
+            </>
+          )}
         </section>
       )}
     </div>
@@ -284,7 +338,12 @@ const boxStyle: React.CSSProperties = {
 };
 const boxTitle: React.CSSProperties = { fontSize: 15, marginBottom: 4 };
 const boxDesc: React.CSSProperties = { fontSize: 13, color: "#666", marginBottom: 8 };
-const fieldSetStyle: React.CSSProperties = { marginTop: 16, padding: 12, border: "1px solid #ccc", borderRadius: 8 };
+const fieldSetStyle: React.CSSProperties = {
+  marginTop: 16,
+  padding: 12,
+  border: "1px solid #ccc",
+  borderRadius: 8,
+};
 const legendStyle: React.CSSProperties = { fontWeight: "bold", fontSize: 14 };
 const buttonStyle: React.CSSProperties = {
   display: "inline-block",
