@@ -9,7 +9,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { persistSession: false } }
 );
-
+const baseDir = `analyze/${crypto.randomUUID()}`; // ←ここだけでOK
 function safeName(name: string) {
   return name.replace(/[^\w.\-()]+/g, "_");
 }
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
     }
 
     const bucket = process.env.SUPABASE_PDF_BUCKET ?? "report-pdfs";
-    const baseDir = `analyze/${Date.now()}`;
+    const baseDir = `analyze/${crypto.randomUUID()}`;
 
     async function upload(file: File) {
       const arrayBuffer = await file.arrayBuffer();
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
 
       const { error } = await supabase.storage.from(bucket).upload(path, arrayBuffer, {
         contentType: file.type || "application/pdf",
-        upsert: false,
+        upsert: true,
       });
       if (error) throw new Error(`Supabase upload failed: ${error.message}`);
 
