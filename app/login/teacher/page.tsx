@@ -63,9 +63,23 @@ export default function TeacherLoginPage() {
 
         {err && <p style={{ color: "red", marginTop: 12 }}>{err}</p>}
 
-        <button disabled={loading} style={{ marginTop: 16, width: "100%" }}>
-          {loading ? "ログイン中..." : "ログイン"}
-        </button>
+        <button
+  disabled={loading}
+  style={{
+    marginTop: 16,
+    width: "100%",
+    padding: "10px",
+    background: "#2563eb",
+    color: "#fff",
+    border: "none",
+    borderRadius: 6,
+    cursor: "pointer",
+    fontSize: 14,
+  }}
+>
+  {loading ? "ログイン中..." : "ログイン"}
+</button>
+
       </form>
 
       <p style={{ marginTop: 12, color: "#666" }}>（デモ用：test / test）</p>
