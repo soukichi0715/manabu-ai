@@ -67,9 +67,117 @@ async function ocrPdfFromStorage(params: {
     ],
   });
 
-  return resp.output_text ?? "";
+  // 4) OpenAI側のファイルを掃除（SDKでは delete）
+  try {
+    await openai.files.delete(uploaded.id);
+  } catch {
+    // 削除失敗しても致命的ではないので無視
+  }
+
+  // ※Responses API は output_text を使うのが型的に安全
+  return typeof resp.output_text === "string" ? resp.output_text : "";
 }
 
+/* =========================
+   JSON schema（抽出）
+========================= */
+type ReportJson = {
+  docType: "report";
+  student: { name: string | null; id: string | null };
+  test: { name: string | null; date: string | null };
+  overall: { score: number | null; deviation: number | null; rank: number | null; avg: number | null };
+  subjects: { name: string; score: number | null; deviation: number | null; avg: number | null; rank: number | null }[];
+  notes: string[];
+};
+
+function safeParseJson<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** OCRテキストから成績表JSONを抽出（MVP） */
+async function extractReportJsonFromText(params: {
+  filename: string;
+  extractedText: string;
+}) {
+  const { filename, extractedText } = params;
+
+  // 長すぎると遅くなるので適度に圧縮（先頭＋末尾）
+  const head = extractedText.slice(0, 4000);
+  const tail = extractedText.slice(-4000);
+  const snippet = `${head}\n...\n${tail}`;
+
+  const resp = await openai.responses.create({
+    model: "gpt-4.1-mini",
+    input: [
+      {
+        role: "system",
+        content:
+          "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
+          "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。",
+      },
+      {
+        role: "user",
+        content:
+          `ファイル名: ${filename}\n\n` +
+          "次のOCRテキストから成績表の情報を抽出して、必ずJSONのみで返してください。\n" +
+          "ルール:\n" +
+          "- 取れない項目は null\n" +
+          "- 数字は可能なら number（例: 54.3）\n" +
+          "- 科目は配列 subjects にまとめる（科目名、得点、偏差値、平均、順位）\n" +
+          "- 余計な文章は出さない（JSONのみ）\n\n" +
+          "返却JSONスキーマ（この形を守る）:\n" +
+          `{
+  "docType":"report",
+  "student":{"name":null,"id":null},
+  "test":{"name":null,"date":null},
+  "overall":{"score":null,"deviation":null,"rank":null,"avg":null},
+  "subjects":[{"name":"算数","score":null,"deviation":null,"avg":null,"rank":null}],
+  "notes":[]
+}\n\n` +
+          "OCRテキスト:\n" +
+          snippet,
+      },
+    ],
+  });
+
+  const out = (resp.output_text ?? "").trim();
+
+  const parsed = safeParseJson<ReportJson>(out);
+  if (!parsed || parsed.docType !== "report") {
+    return {
+      ok: false as const,
+      reportJson: null as ReportJson | null,
+      error: "JSONの解析に失敗（フォーマット不正）",
+      raw: out,
+    };
+  }
+
+  // 最低限の整形（subjects.nameが空なら弾くなど）
+  if (!Array.isArray(parsed.subjects)) parsed.subjects = [];
+  parsed.subjects = parsed.subjects
+    .filter((s) => s && typeof s.name === "string" && s.name.trim().length > 0)
+    .map((s) => ({
+      name: s.name.trim(),
+      score: typeof s.score === "number" ? s.score : null,
+      deviation: typeof s.deviation === "number" ? s.deviation : null,
+      avg: typeof s.avg === "number" ? s.avg : null,
+      rank: typeof s.rank === "number" ? s.rank : null,
+    }));
+
+  return {
+    ok: true as const,
+    reportJson: parsed,
+    raw: out, // デバッグ用（必要なければ後で消す）
+  };
+}
+
+/* =========================
+   成績表判定
+========================= */
 /** OCRテキストから「成績表っぽいか？」判定（ハード判定→LLM） */
 async function judgeGradeReport(params: {
   filename: string;
@@ -77,8 +185,10 @@ async function judgeGradeReport(params: {
 }) {
   const { filename, extractedText } = params;
 
-  // 長すぎるとコスト＆時間が増えるので、冒頭中心に切る
-  const snippet = extractedText.slice(0, 6000);
+  // 先頭+末尾（抜け道対策）
+  const head = extractedText.slice(0, 3000);
+  const tail = extractedText.slice(-3000);
+  const snippet = `${head}\n...\n${tail}`;
 
   if (!snippet.trim()) {
     return {
@@ -124,7 +234,6 @@ async function judgeGradeReport(params: {
 
   const posCount = POSITIVE_HINTS.reduce((acc, re) => acc + (re.test(snippet) ? 1 : 0), 0);
 
-  // ここは好みで調整。まずは「2つ未満なら成績表の可能性低い」くらいが安定。
   if (posCount < 2) {
     return {
       isGradeReport: false,
@@ -153,7 +262,7 @@ async function judgeGradeReport(params: {
           "ファイル名: " +
           filename +
           "\n\n" +
-          "OCRテキスト（先頭抜粋）:\n" +
+          "OCRテキスト（抜粋）:\n" +
           snippet +
           "\n\n" +
           "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
@@ -185,6 +294,106 @@ async function judgeGradeReport(params: {
       reason: "判定JSONの解析に失敗（フォーマット不正）",
     };
   }
+}
+
+/* =========================
+   集計（analysis）  ★ここが②の正しい置き場所：POSTの外
+========================= */
+type SubjectAgg = {
+  name: string;
+  count: number;
+  avgDeviation: number | null;
+  lastDeviation: number | null;
+  minDeviation: number | null;
+};
+
+function safeNum(n: any): number | null {
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+function mergeAgg(a: SubjectAgg, dev: number | null): SubjectAgg {
+  if (dev === null) return a;
+
+  const newCount = a.count + 1;
+  const newAvg =
+    a.avgDeviation === null ? dev : (a.avgDeviation * a.count + dev) / newCount;
+
+  const newMin = a.minDeviation === null ? dev : Math.min(a.minDeviation, dev);
+
+  return {
+    ...a,
+    count: newCount,
+    avgDeviation: newAvg,
+    lastDeviation: dev,
+    minDeviation: newMin,
+  };
+}
+
+function analyzeSinglesReportJson(singles: Array<{ reportJson?: any; filename?: string }>) {
+  const map = new Map<string, SubjectAgg>();
+
+  for (const s of singles) {
+    const r = s.reportJson;
+    if (!r || !Array.isArray(r.subjects)) continue;
+
+    for (const subj of r.subjects) {
+      const name = String(subj?.name ?? "").trim();
+      if (!name) continue;
+
+      const dev = safeNum(subj?.deviation);
+      const cur =
+        map.get(name) ??
+        ({
+          name,
+          count: 0,
+          avgDeviation: null,
+          lastDeviation: null,
+          minDeviation: null,
+        } as SubjectAgg);
+
+      map.set(name, mergeAgg(cur, dev));
+    }
+  }
+
+  const subjects = Array.from(map.values());
+
+  // 平均偏差値が低い順（nullは最後）
+  subjects.sort((a, b) => {
+    const av = a.avgDeviation ?? 9999;
+    const bv = b.avgDeviation ?? 9999;
+    return av - bv;
+  });
+
+  const weakest = subjects[0]?.avgDeviation != null ? subjects[0] : null;
+
+  return { subjects, weakest };
+}
+
+function analyzeYearlyReportJson(yearly: any) {
+  if (!yearly || !Array.isArray(yearly.subjects)) {
+    return { subjects: [], weakest: null };
+  }
+
+  const subjects = yearly.subjects
+    .map((s: any) => ({
+      name: String(s?.name ?? "").trim(),
+      deviation: safeNum(s?.deviation),
+      score: safeNum(s?.score),
+      avg: safeNum(s?.avg),
+      rank: safeNum(s?.rank),
+    }))
+    .filter((s: any) => s.name);
+
+  const sorted = [...subjects].sort((a, b) => {
+    const av = a.deviation ?? 9999;
+    const bv = b.deviation ?? 9999;
+    return av - bv;
+  });
+
+  return {
+    subjects,
+    weakest: sorted[0]?.deviation != null ? sorted[0] : null,
+  };
 }
 
 /* =========================
@@ -242,7 +451,7 @@ export async function POST(req: NextRequest) {
 
     const uploadedYearly = yearlyFile ? await upload(yearlyFile) : null;
 
-    /* ---------- OCR + 成績表判定 ---------- */
+    /* ---------- OCR + 成績表判定 + JSON化 ---------- */
 
     // 単発は枚数制限（Vercelタイムアウト対策）
     const MAX_SINGLE_OCR = 5;
@@ -262,11 +471,35 @@ export async function POST(req: NextRequest) {
           extractedText: text,
         });
 
+        let reportJson: ReportJson | null = null;
+        let reportJsonMeta: { ok: boolean; error: string | null } | null = null;
+
+        if (gradeCheck.isGradeReport) {
+          const extracted = await extractReportJsonFromText({
+            filename: f.name,
+            extractedText: text,
+          });
+
+          reportJson = extracted.reportJson;
+          reportJsonMeta = {
+            ok: extracted.ok,
+            error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+          };
+        } else {
+          reportJson = null;
+          reportJsonMeta = {
+            ok: false,
+            error: "成績表ではないためJSON化をスキップ",
+          };
+        }
+
         singleOcrResults.push({
           ...f,
           ok: true,
           text,
-          gradeCheck, // ★追加：成績表判定
+          gradeCheck,
+          reportJson,
+          reportJsonMeta,
         });
       } catch (e: any) {
         singleOcrResults.push({
@@ -286,6 +519,8 @@ export async function POST(req: NextRequest) {
     let yearlyGradeCheck:
       | { isGradeReport: boolean; confidence: number; reason: string }
       | null = null;
+    let yearlyReportJson: ReportJson | null = null;
+    let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null = null;
 
     if (uploadedYearly) {
       try {
@@ -299,6 +534,25 @@ export async function POST(req: NextRequest) {
           filename: uploadedYearly.name,
           extractedText: yearlyOcrText,
         });
+
+        if (yearlyOcrText && yearlyGradeCheck?.isGradeReport) {
+          const extracted = await extractReportJsonFromText({
+            filename: uploadedYearly.name,
+            extractedText: yearlyOcrText,
+          });
+
+          yearlyReportJson = extracted.reportJson;
+          yearlyReportJsonMeta = {
+            ok: extracted.ok,
+            error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+          };
+        } else {
+          yearlyReportJson = null;
+          yearlyReportJsonMeta = {
+            ok: false,
+            error: "成績表ではないためJSON化をスキップ",
+          };
+        }
       } catch (e: any) {
         yearlyOcrText = null;
         yearlyGradeCheck = {
@@ -308,6 +562,15 @@ export async function POST(req: NextRequest) {
         };
       }
     }
+
+    /* ---------- ②: JSONを使った分析集計（returnの直前で計算） ---------- */
+    const singleJsonItems = (singleOcrResults ?? []).map((x: any) => ({
+      filename: x.name, // ★ x.filename ではなく x.name
+      reportJson: x.reportJson,
+    }));
+
+    const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
+    const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
 
     /* ---------- Response ---------- */
     return NextResponse.json({
@@ -319,18 +582,25 @@ export async function POST(req: NextRequest) {
       ocr: {
         singles: singleOcrResults,
         yearly: yearlyOcrText,
-        yearlyGradeCheck, // ★追加：年間の成績表判定
+        yearlyGradeCheck,
+        yearlyReportJson,
+        yearlyReportJsonMeta,
         note:
           uploadedSingles.length > MAX_SINGLE_OCR
             ? `単発PDFが多いため、先頭${MAX_SINGLE_OCR}枚のみOCRしました`
             : null,
       },
 
-      // UIで選んだ設定（次フェーズで分析生成に使う）
       selections: {
         tone,
         focus,
         target,
+      },
+
+      // ★追加：分析結果（UIで表示できる）
+      analysis: {
+        singles: singleAnalysis,
+        yearly: yearlyAnalysis,
       },
     });
   } catch (e: any) {
