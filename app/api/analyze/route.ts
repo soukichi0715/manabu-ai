@@ -33,7 +33,9 @@ async function ocrPdfFromStorage(params: {
   const { bucket, path, filename } = params;
 
   // 1) PDF download
-  const { data: pdfBlob, error } = await supabase.storage.from(bucket).download(path);
+  const { data: pdfBlob, error } = await supabase.storage
+    .from(bucket)
+    .download(path);
 
   if (error || !pdfBlob) {
     throw new Error(`Supabase download failed: ${error?.message}`);
@@ -85,8 +87,19 @@ type ReportJson = {
   docType: "report";
   student: { name: string | null; id: string | null };
   test: { name: string | null; date: string | null };
-  overall: { score: number | null; deviation: number | null; rank: number | null; avg: number | null };
-  subjects: { name: string; score: number | null; deviation: number | null; avg: number | null; rank: number | null }[];
+  overall: {
+    score: number | null;
+    deviation: number | null;
+    rank: number | null;
+    avg: number | null;
+  };
+  subjects: {
+    name: string;
+    score: number | null;
+    deviation: number | null;
+    avg: number | null;
+    rank: number | null;
+  }[];
   notes: string[];
 };
 
@@ -232,7 +245,10 @@ async function judgeGradeReport(params: {
     /科目|国語|算数|理科|社会/,
   ];
 
-  const posCount = POSITIVE_HINTS.reduce((acc, re) => acc + (re.test(snippet) ? 1 : 0), 0);
+  const posCount = POSITIVE_HINTS.reduce(
+    (acc, re) => acc + (re.test(snippet) ? 1 : 0),
+    0
+  );
 
   if (posCount < 2) {
     return {
@@ -297,7 +313,7 @@ async function judgeGradeReport(params: {
 }
 
 /* =========================
-   集計（analysis）  ★ここが②の正しい置き場所：POSTの外
+   集計（analysis）
 ========================= */
 type SubjectAgg = {
   name: string;
@@ -329,7 +345,9 @@ function mergeAgg(a: SubjectAgg, dev: number | null): SubjectAgg {
   };
 }
 
-function analyzeSinglesReportJson(singles: Array<{ reportJson?: any; filename?: string }>) {
+function analyzeSinglesReportJson(
+  singles: Array<{ reportJson?: any; filename?: string }>
+) {
   const map = new Map<string, SubjectAgg>();
 
   for (const s of singles) {
@@ -397,6 +415,128 @@ function analyzeYearlyReportJson(yearly: any) {
 }
 
 /* =========================
+   講評生成（commentary）
+========================= */
+type Tone = "gentle" | "balanced" | "strict";
+type Target = "student" | "parent" | "teacher";
+type FocusAxis = "mistake" | "process" | "knowledge" | "attitude";
+
+function toneLabel(t: Tone) {
+  if (t === "gentle") return "優しめ（共感多め）";
+  if (t === "strict") return "厳しめ（改善点を明確に）";
+  return "バランス（優しさ7：厳しさ3）";
+}
+function targetLabel(t: Target) {
+  if (t === "parent") return "保護者向け";
+  if (t === "teacher") return "講師/社内向け";
+  return "子ども向け";
+}
+function focusLabel(f: FocusAxis) {
+  switch (f) {
+    case "mistake":
+      return "ミス分析";
+    case "process":
+      return "思考プロセス";
+    case "knowledge":
+      return "知識/定着";
+    case "attitude":
+      return "姿勢/習慣";
+    default:
+      return f;
+  }
+}
+
+async function generateCommentary(params: {
+  tone: Tone;
+  target: Target;
+  focus: FocusAxis[];
+  singleAnalysis: any;
+  yearlyAnalysis: any;
+  singlesReportJson: Array<{ name: string; reportJson: ReportJson | null }>;
+  yearlyReportJson: ReportJson | null;
+}) {
+  const {
+    tone,
+    target,
+    focus,
+    singleAnalysis,
+    yearlyAnalysis,
+    singlesReportJson,
+    yearlyReportJson,
+  } = params;
+
+  // 送る情報は「JSON中心」に絞る（OCR全文は渡さない＝速く安定）
+  const payload = {
+    settings: {
+      tone,
+      toneLabel: toneLabel(tone),
+      target,
+      targetLabel: targetLabel(target),
+      focus: focus.map((x) => ({ key: x, label: focusLabel(x) })),
+    },
+    analysis: {
+      singles: singleAnalysis,
+      yearly: yearlyAnalysis,
+    },
+    // 重くならないように、単発JSONは科目だけ抽出
+    singles: singlesReportJson.map((x) => ({
+      name: x.name,
+      subjects: x.reportJson?.subjects ?? null,
+      overall: x.reportJson?.overall ?? null,
+      test: x.reportJson?.test ?? null,
+    })),
+    yearly: yearlyReportJson
+      ? {
+          subjects: yearlyReportJson.subjects,
+          overall: yearlyReportJson.overall,
+          test: yearlyReportJson.test,
+        }
+      : null,
+  };
+
+  const system = `
+あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
+
+◆最重要の価値観
+・「正しく解く力」よりも、「自分で考える力」を育てることを最優先にする。
+・ミスは責めず、「次に伸びるヒント」として扱う。
+
+◆話し方・トーン
+・基本はやさしくフランク（優しさ7：厳しさ3）。ただし指摘すべき点は明確に。
+・ユーザー設定 tone/target を必ず反映。
+
+◆出力ルール
+・日本語
+・余計な前置きなし
+・以下の構成で出す（対象に応じて言い回し調整）
+  1) まず一言（共感/現状）
+  2) 事実（数値の要約：弱点科目や平均偏差値など）
+  3) 原因仮説（focusに沿って2〜4個）
+  4) 次の一手（今日/今週でできる行動。具体）
+  5) 最後に一言（対話を続ける問いかけ）
+・数値がnullのものは無理に決めつけない。「未取得」と言う。
+  `.trim();
+
+  const user = `
+以下は成績表JSONと集計結果です。
+このデータを元に「まなぶ先生AI」として講評を書いてください。
+
+【データ(JSON)】
+${JSON.stringify(payload, null, 2)}
+`.trim();
+
+  const resp = await openai.responses.create({
+    model: "gpt-4.1-mini",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  return typeof resp.output_text === "string" ? resp.output_text.trim() : "";
+}
+
+/* =========================
    Handler
 ========================= */
 export async function POST(req: NextRequest) {
@@ -406,19 +546,22 @@ export async function POST(req: NextRequest) {
     /* ---------- UIからの入力 ---------- */
 
     // 単発：複数
-    const singleFiles = fd.getAll("single").filter((v): v is File => v instanceof File);
+    const singleFiles = fd
+      .getAll("single")
+      .filter((v): v is File => v instanceof File);
 
     // 年間：1枚
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
 
     // 講師設定
-    const tone = fd.get("tone")?.toString() ?? "gentle";
-    const target = fd.get("target")?.toString() ?? "student";
+    const tone = (fd.get("tone")?.toString() ?? "gentle") as Tone;
+    const target = (fd.get("target")?.toString() ?? "student") as Target;
 
-    let focus: string[] = [];
+    let focus: FocusAxis[] = [];
     try {
       focus = JSON.parse(fd.get("focus")?.toString() ?? "[]");
+      if (!Array.isArray(focus)) focus = [];
     } catch {
       focus = [];
     }
@@ -520,7 +663,8 @@ export async function POST(req: NextRequest) {
       | { isGradeReport: boolean; confidence: number; reason: string }
       | null = null;
     let yearlyReportJson: ReportJson | null = null;
-    let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null = null;
+    let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null =
+      null;
 
     if (uploadedYearly) {
       try {
@@ -572,9 +716,33 @@ export async function POST(req: NextRequest) {
     const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
     const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
 
+    /* ---------- ★追加：講評生成（commentary） ---------- */
+    const singlesReportJson = (singleOcrResults ?? []).map((x: any) => ({
+      name: x.name,
+      reportJson: x.reportJson as ReportJson | null,
+    }));
+
+    // ※講評は「成績表のJSONが1つも無い」場合、薄くなるのでガード
+    const hasAnyReportJson =
+      singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
+
+    const commentary = hasAnyReportJson
+      ? await generateCommentary({
+          tone,
+          target,
+          focus,
+          singleAnalysis,
+          yearlyAnalysis,
+          singlesReportJson,
+          yearlyReportJson,
+        })
+      : "成績表として読み取れたデータがまだありません。成績表PDFを入れてもう一度試してみてください。";
+
     /* ---------- Response ---------- */
     return NextResponse.json({
-      summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
+      summary: `単発=${uploadedSingles.length}枚 / 年間=${
+        uploadedYearly ? "あり" : "なし"
+      }`,
       files: {
         singles: uploadedSingles,
         yearly: uploadedYearly,
@@ -597,11 +765,13 @@ export async function POST(req: NextRequest) {
         target,
       },
 
-      // ★追加：分析結果（UIで表示できる）
       analysis: {
         singles: singleAnalysis,
         yearly: yearlyAnalysis,
       },
+
+      // ★追加：講評（まなぶ先生AI）
+      commentary,
     });
   } catch (e: any) {
     return new NextResponse(e?.message ?? "Server error", { status: 500 });

@@ -1,478 +1,656 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 
-/* =========================
-   型定義
-========================= */
-type TeacherTone = "gentle" | "balanced" | "strict";
+type Tone = "gentle" | "balanced" | "strict";
+type Target = "student" | "parent" | "teacher";
 type FocusAxis = "mistake" | "process" | "knowledge" | "attitude";
-type OutputTarget = "student" | "parent" | "teacher";
 
-/* =========================
-   Component
-========================= */
+type GradeCheck = {
+  isGradeReport: boolean;
+  confidence: number;
+  reason: string;
+};
+
+type ReportJson = {
+  docType: "report";
+  student: { name: string | null; id: string | null };
+  test: { name: string | null; date: string | null };
+  overall: { score: number | null; deviation: number | null; rank: number | null; avg: number | null };
+  subjects: { name: string; score: number | null; deviation: number | null; avg: number | null; rank: number | null }[];
+  notes: string[];
+};
+
+type OcrSingleResult =
+  | {
+      ok: true;
+      path: string;
+      name: string;
+      size: number;
+      text: string;
+      gradeCheck: GradeCheck;
+      reportJson: ReportJson | null;
+      reportJsonMeta: { ok: boolean; error: string | null } | null;
+    }
+  | {
+      ok: false;
+      path: string;
+      name: string;
+      size: number;
+      error: string;
+      gradeCheck?: GradeCheck;
+    };
+
+type AnalyzeResponse = {
+  summary: string;
+  files: {
+    singles: { path: string; name: string; size: number }[];
+    yearly: { path: string; name: string; size: number } | null;
+  };
+  ocr: {
+    singles: OcrSingleResult[];
+    yearly: string | null;
+    yearlyGradeCheck: GradeCheck | null;
+    yearlyReportJson: ReportJson | null;
+    yearlyReportJsonMeta: { ok: boolean; error: string | null } | null;
+    note: string | null;
+  };
+  selections: {
+    tone: Tone;
+    focus: FocusAxis[];
+    target: Target;
+  };
+  analysis?: {
+    singles: {
+      subjects: {
+        name: string;
+        count: number;
+        avgDeviation: number | null;
+        lastDeviation: number | null;
+        minDeviation: number | null;
+      }[];
+      weakest: {
+        name: string;
+        count: number;
+        avgDeviation: number | null;
+        lastDeviation: number | null;
+        minDeviation: number | null;
+      } | null;
+    };
+    yearly: {
+      subjects: {
+        name: string;
+        deviation: number | null;
+        score: number | null;
+        avg: number | null;
+        rank: number | null;
+      }[];
+      weakest: {
+        name: string;
+        deviation: number | null;
+        score: number | null;
+        avg: number | null;
+        rank: number | null;
+      } | null;
+    };
+  };
+};
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes)) return "-";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 export default function AnalyzeClient() {
-  /** hidden input refs（ボタンで発火） */
-  const singleInputRef = useRef<HTMLInputElement | null>(null);
-  const yearlyInputRef = useRef<HTMLInputElement | null>(null);
-
-  /** ファイル */
-  const [singleFiles, setSingleFiles] = useState<File[]>([]);
+  const [singleFiles, setSingleFiles] = useState<FileList | null>(null);
   const [yearlyFile, setYearlyFile] = useState<File | null>(null);
 
-  /** 講師設定（UI → API 連携） */
-  const [tone, setTone] = useState<TeacherTone>("gentle");
+  const [tone, setTone] = useState<Tone>("gentle");
+  const [target, setTarget] = useState<Target>("student");
   const [focus, setFocus] = useState<FocusAxis[]>(["mistake"]);
-  const [target, setTarget] = useState<OutputTarget>("student"); // ★1つのみ
 
-  /** 通信状態 */
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<any>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [result, setResult] = useState<AnalyzeResponse | null>(null);
 
-  /** checkbox 切替 */
-  function toggle<T>(arr: T[], value: T, setter: (v: T[]) => void) {
-    setter(arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value]);
+  const singleCount = singleFiles?.length ?? 0;
+
+  const focusOptions: { key: FocusAxis; label: string; desc: string }[] = useMemo(
+    () => [
+      { key: "mistake", label: "ミス分析", desc: "取りこぼし・ケアレスミス・傾向" },
+      { key: "process", label: "思考プロセス", desc: "考え方の順序・図や式の使い方" },
+      { key: "knowledge", label: "知識/定着", desc: "典型解法・基礎の穴・暗記事項" },
+      { key: "attitude", label: "姿勢/習慣", desc: "時間配分・見直し・復習サイクル" },
+    ],
+    []
+  );
+
+  function toggleFocus(k: FocusAxis) {
+    setFocus((prev) => {
+      if (prev.includes(k)) return prev.filter((x) => x !== k);
+      return [...prev, k];
+    });
   }
 
-  /** UI表示用：ファイル名一覧 */
-  const singleFileNames = useMemo(() => singleFiles.map((f) => f.name), [singleFiles]);
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setResult(null);
 
-  /* =========================
-     File handlers
-  ========================= */
-  function onPickSingles() {
-    singleInputRef.current?.click();
-  }
+    if (!singleFiles && !yearlyFile) {
+      setErr("PDFを選択してください（単発か年間のどちらか）。");
+      return;
+    }
 
-  function onPickYearly() {
-    yearlyInputRef.current?.click();
-  }
-
-  function onSinglesSelected(files: FileList | null) {
-    const picked = Array.from(files ?? []);
-    if (picked.length === 0) return;
-
-    setSingleFiles((prev) => [...prev, ...picked]);
-
-    if (singleInputRef.current) singleInputRef.current.value = "";
-  }
-
-  function onYearlySelected(files: FileList | null) {
-    const picked = files?.[0] ?? null;
-    setYearlyFile(picked);
-
-    if (yearlyInputRef.current) yearlyInputRef.current.value = "";
-  }
-
-  function clearSingles() {
-    setSingleFiles([]);
-  }
-
-  function removeSingleAt(idx: number) {
-    setSingleFiles((prev) => prev.filter((_, i) => i !== idx));
-  }
-
-  function clearYearly() {
-    setYearlyFile(null);
-  }
-
-  /* =========================
-     分析実行（API連携）
-  ========================= */
-  async function onAnalyze() {
+    setLoading(true);
     try {
-      setLoading(true);
-      setError(null);
-      setResult(null);
-
       const fd = new FormData();
 
-      // 単発：複数
-      singleFiles.forEach((f) => fd.append("single", f));
+      // UI仕様：単発=複数（キー single を複数append）
+      if (singleFiles) {
+        Array.from(singleFiles).forEach((f) => fd.append("single", f));
+      }
 
-      // 年間：1枚
-      if (yearlyFile) fd.append("yearly", yearlyFile);
+      // UI仕様：年間=1枚（キー yearly）
+      if (yearlyFile) {
+        fd.append("yearly", yearlyFile);
+      }
 
-      // UI → API 連携
       fd.append("tone", tone);
+      fd.append("target", target);
       fd.append("focus", JSON.stringify(focus));
-      fd.append("target", target); // ★1つのみ
 
-      const res = await fetch("/api/analyze", {
+      const r = await fetch("/api/analyze", {
         method: "POST",
         body: fd,
       });
 
-      if (!res.ok) throw new Error(await res.text());
-      setResult(await res.json());
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        throw new Error(t || `Server error (${r.status})`);
+      }
+
+      const data = (await r.json()) as AnalyzeResponse;
+      setResult(data);
     } catch (e: any) {
-      setError(e?.message ?? "エラーが発生しました");
+      setErr(e?.message ?? "エラーが発生しました");
     } finally {
       setLoading(false);
     }
   }
 
-  const canRun = singleFiles.length > 0 || !!yearlyFile;
-
-  /* =========================
-     UI
-  ========================= */
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
-      {/* ---------- Header ---------- */}
-      <h1 style={{ fontSize: 26, marginBottom: 8 }}>分析モード</h1>
-      <p style={{ color: "#555", marginBottom: 28 }}>
-        成績PDFをアップロードすると、AIが内容を読み取り、分析の土台を作成します。
-        <br />
-        ※ スキャン画像PDFにも対応しています。
-      </p>
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: 18 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 12 }}>分析モード</h1>
 
-      {/* hidden inputs */}
-      <input
-        ref={singleInputRef}
-        type="file"
-        accept="application/pdf"
-        multiple
-        style={{ display: "none" }}
-        onChange={(e) => onSinglesSelected(e.target.files)}
-      />
-      <input
-        ref={yearlyInputRef}
-        type="file"
-        accept="application/pdf"
-        style={{ display: "none" }}
-        onChange={(e) => onYearlySelected(e.target.files)}
-      />
-
-      {/* ---------- ① Upload ---------- */}
-      <section style={sectionStyle}>
-        <h2 style={sectionTitle}>① 成績データのアップロード</h2>
-
-        {/* 単発（複数） */}
-        <div style={boxStyle}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-            <div>
-              <h3 style={{ margin: 0 }}>今回のテスト（単発・複数可）</h3>
-              <p style={hint}>公開模試・育成テストなど（複数枚OK）</p>
+      <form onSubmit={onSubmit}>
+        {/* ① Upload */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {/* 単発テスト */}
+          <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>① 今回のテスト（単発）</div>
+            <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>
+              PDFを複数枚アップロードできます（例：表紙/成績/各科目など）
             </div>
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button type="button" style={pickButton} onClick={onPickSingles}>
-                単発PDFを選択
-              </button>
-              <button
-                type="button"
-                style={{ ...subButton, opacity: singleFiles.length ? 1 : 0.5 }}
-                onClick={clearSingles}
-                disabled={singleFiles.length === 0}
-              >
-                クリア
-              </button>
+            <input
+              type="file"
+              accept="application/pdf"
+              multiple
+              onChange={(e) => setSingleFiles(e.target.files)}
+            />
+
+            <div style={{ marginTop: 8, color: "#444", fontSize: 13 }}>
+              選択：{singleCount ? `${singleCount} 件` : "なし"}
             </div>
+
+            {singleFiles && singleCount > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {Array.from(singleFiles).map((f) => (
+                    <li key={f.name} style={{ fontSize: 13, color: "#333" }}>
+                      {f.name}（{formatBytes(f.size)}）
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
-          {singleFiles.length > 0 ? (
-            <div style={{ marginTop: 10 }}>
-              <p style={fileInfo}>選択中：{singleFiles.length} 件</p>
-
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {singleFileNames.map((name, i) => (
-                  <li key={`${name}-${i}`} style={{ marginBottom: 6 }}>
-                    <span>{name}</span>
-                    <button
-                      type="button"
-                      style={{ ...linkButton, marginLeft: 10 }}
-                      onClick={() => removeSingleAt(i)}
-                      disabled={loading}
-                      title="この1件だけ外す"
-                    >
-                      削除
-                    </button>
-                  </li>
-                ))}
-              </ul>
-
-              <p style={{ ...hint, marginTop: 10 }}>
-                ※ 追加したい場合は、もう一度「単発PDFを選択」を押してください（追加入力）。
-              </p>
-            </div>
-          ) : (
-            <p style={hint}>未選択</p>
-          )}
-        </div>
-
-        {/* 年間（1枚） */}
-        <div style={boxStyle}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-            <div>
-              <h3 style={{ margin: 0 }}>年間成績表（1枚）</h3>
-              <p style={hint}>1年分の成績推移が分かるPDF（任意）</p>
+          {/* 年間成績 */}
+          <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>② 1年分の成績（年間）</div>
+            <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>
+              年間の成績表は1枚想定（推移・一覧）
             </div>
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button type="button" style={pickButton} onClick={onPickYearly}>
-                年間PDFを選択
-              </button>
-              <button
-                type="button"
-                style={{ ...subButton, opacity: yearlyFile ? 1 : 0.5 }}
-                onClick={clearYearly}
-                disabled={!yearlyFile}
-              >
-                クリア
-              </button>
+            <input
+              type="file"
+              accept="application/pdf"
+              onChange={(e) => setYearlyFile(e.target.files?.[0] ?? null)}
+            />
+
+            <div style={{ marginTop: 8, color: "#444", fontSize: 13 }}>
+              選択：{yearlyFile ? `${yearlyFile.name}（${formatBytes(yearlyFile.size)}）` : "なし"}
             </div>
           </div>
-
-          {yearlyFile ? <p style={fileInfo}>選択中：{yearlyFile.name}</p> : <p style={hint}>未選択</p>}
-        </div>
-      </section>
-
-      {/* ---------- ② Teacher Settings ---------- */}
-      <section style={sectionStyle}>
-        <h2 style={sectionTitle}>② 講師の視点・分析方針</h2>
-
-        {/* トーン */}
-        <div style={boxStyle}>
-          <h3>指導トーン</h3>
-          <label>
-            <input type="radio" name="tone" checked={tone === "gentle"} onChange={() => setTone("gentle")} />
-            やさしく寄り添う
-          </label>
-          <br />
-          <label>
-            <input type="radio" name="tone" checked={tone === "balanced"} onChange={() => setTone("balanced")} />
-            バランス型（標準）
-          </label>
-          <br />
-          <label>
-            <input type="radio" name="tone" checked={tone === "strict"} onChange={() => setTone("strict")} />
-            厳しめに課題を明確化
-          </label>
         </div>
 
-        {/* 視点（複数） */}
-        <div style={boxStyle}>
-          <h3>分析の軸（複数選択可）</h3>
-          <label>
-            <input
-              type="checkbox"
-              checked={focus.includes("mistake")}
-              onChange={() => toggle(focus, "mistake", setFocus)}
-            />
-            ミスの種類・傾向
-          </label>
-          <br />
-          <label>
-            <input
-              type="checkbox"
-              checked={focus.includes("process")}
-              onChange={() => toggle(focus, "process", setFocus)}
-            />
-            解き方・思考プロセス
-          </label>
-          <br />
-          <label>
-            <input
-              type="checkbox"
-              checked={focus.includes("knowledge")}
-              onChange={() => toggle(focus, "knowledge", setFocus)}
-            />
-            知識・単元理解
-          </label>
-          <br />
-          <label>
-            <input
-              type="checkbox"
-              checked={focus.includes("attitude")}
-              onChange={() => toggle(focus, "attitude", setFocus)}
-            />
-            学習姿勢・取り組み方
-          </label>
+        {/* ② Teacher selections */}
+        <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14, marginTop: 12 }}>
+          <div style={{ fontWeight: 800, marginBottom: 10 }}>③ 講師の視点（出力設定）</div>
 
-          <p style={{ ...hint, marginTop: 10 }}>
-            ※ APIには <code>focus</code> をJSON配列で送ります（例：["mistake","process"]）。
-          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            {/* tone */}
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>トーン</div>
+              <label style={{ display: "block", marginBottom: 6 }}>
+                <input
+                  type="radio"
+                  name="tone"
+                  value="gentle"
+                  checked={tone === "gentle"}
+                  onChange={() => setTone("gentle")}
+                />{" "}
+                優しめ（共感多め）
+              </label>
+              <label style={{ display: "block", marginBottom: 6 }}>
+                <input
+                  type="radio"
+                  name="tone"
+                  value="balanced"
+                  checked={tone === "balanced"}
+                  onChange={() => setTone("balanced")}
+                />{" "}
+                バランス（優しさ7：厳しさ3）
+              </label>
+              <label style={{ display: "block" }}>
+                <input
+                  type="radio"
+                  name="tone"
+                  value="strict"
+                  checked={tone === "strict"}
+                  onChange={() => setTone("strict")}
+                />{" "}
+                厳しめ（改善点を明確に）
+              </label>
+            </div>
+
+            {/* target */}
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>出力対象</div>
+              <label style={{ display: "block", marginBottom: 6 }}>
+                <input
+                  type="radio"
+                  name="target"
+                  value="student"
+                  checked={target === "student"}
+                  onChange={() => setTarget("student")}
+                />{" "}
+                子ども向け
+              </label>
+              <label style={{ display: "block", marginBottom: 6 }}>
+                <input
+                  type="radio"
+                  name="target"
+                  value="parent"
+                  checked={target === "parent"}
+                  onChange={() => setTarget("parent")}
+                />{" "}
+                保護者向け
+              </label>
+              <label style={{ display: "block" }}>
+                <input
+                  type="radio"
+                  name="target"
+                  value="teacher"
+                  checked={target === "teacher"}
+                  onChange={() => setTarget("teacher")}
+                />{" "}
+                講師/社内向け
+              </label>
+            </div>
+
+            {/* focus */}
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>分析の観点</div>
+              {focusOptions.map((o) => (
+                <label key={o.key} style={{ display: "block", marginBottom: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={focus.includes(o.key)}
+                    onChange={() => toggleFocus(o.key)}
+                  />{" "}
+                  <b>{o.label}</b>
+                  <div style={{ fontSize: 12, color: "#666", marginLeft: 22, marginTop: 2 }}>
+                    {o.desc}
+                  </div>
+                </label>
+              ))}
+              {focus.length === 0 && (
+                <div style={{ fontSize: 12, color: "#b00" }}>
+                  ※観点が0だと薄い出力になります（最低1つ推奨）
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* 出力対象（1つのみ） */}
-        <div style={boxStyle}>
-          <h3>出力対象（1つ選択）</h3>
+        {/* Action */}
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #222",
+              background: loading ? "#eee" : "#111",
+              color: loading ? "#666" : "#fff",
+              cursor: loading ? "not-allowed" : "pointer",
+              fontWeight: 800,
+            }}
+          >
+            {loading ? "分析中..." : "この設定で分析する"}
+          </button>
 
-          <label>
-            <input type="radio" name="target" checked={target === "student"} onChange={() => setTarget("student")} />
-            生徒向け
-          </label>
-          <br />
-          <label>
-            <input type="radio" name="target" checked={target === "parent"} onChange={() => setTarget("parent")} />
-            保護者向け
-          </label>
-          <br />
-          <label>
-            <input type="radio" name="target" checked={target === "teacher"} onChange={() => setTarget("teacher")} />
-            講師用（指導メモ）
-          </label>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => {
+              setSingleFiles(null);
+              setYearlyFile(null);
+              setResult(null);
+              setErr(null);
+            }}
+            style={{
+              padding: "10px 14px",
+              borderRadius: 10,
+              border: "1px solid #bbb",
+              background: "#fff",
+              color: "#333",
+              cursor: loading ? "not-allowed" : "pointer",
+              fontWeight: 700,
+            }}
+          >
+            リセット
+          </button>
+
+          {err && <div style={{ color: "#b00", fontWeight: 700 }}>{err}</div>}
         </div>
-      </section>
+      </form>
 
-      {/* ---------- Execute ---------- */}
-      <div style={{ textAlign: "center", marginTop: 32 }}>
-        <button
-          onClick={onAnalyze}
-          disabled={loading || !canRun}
-          style={{
-            ...analyzeButton,
-            opacity: loading || !canRun ? 0.6 : 1,
-            cursor: loading || !canRun ? "not-allowed" : "pointer",
-          }}
-        >
-          {loading ? "分析中…" : "この設定で分析する"}
-        </button>
-
-        {!canRun && <p style={{ ...hint, marginTop: 10 }}>単発PDFまたは年間PDFを選択してください。</p>}
-        {error && <p style={{ color: "crimson", marginTop: 12 }}>{error}</p>}
-      </div>
-
-      {/* ---------- Result ---------- */}
+      {/* Result */}
       {result && (
-        <section style={{ marginTop: 40 }}>
-          <h2>結果</h2>
-          <p>{result.summary}</p>
+        <div style={{ marginTop: 18 }}>
+          <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>結果</div>
+            <div style={{ color: "#333" }}>{result.summary}</div>
 
-          {result.ocr?.note && <p>{result.ocr.note}</p>}
-
-          {/* ★追加：年間 成績表判定 */}
-          {result.ocr?.yearlyGradeCheck && (
-            <div style={{ marginTop: 12 }}>
-              <h3>年間PDF：成績表判定</h3>
-              <p>
-                判定：<b>{result.ocr.yearlyGradeCheck.isGradeReport ? "成績表っぽい ✅" : "成績表ではなさそう ❌"}</b>{" "}
-                （信頼度 {result.ocr.yearlyGradeCheck.confidence}）
-              </p>
-              <p style={hint}>理由：{result.ocr.yearlyGradeCheck.reason}</p>
+            <div style={{ marginTop: 10, fontSize: 13, color: "#555" }}>
+              設定：tone=<b>{result.selections?.tone}</b> / target=<b>{result.selections?.target}</b>{" "}
+              / focus=<b>{(result.selections?.focus ?? []).join(", ") || "-"}</b>
             </div>
-          )}
 
-          {result.ocr?.singles && (
-            <>
-              <h3 style={{ marginTop: 20 }}>単発テスト OCR結果</h3>
+            {result.ocr?.note && (
+              <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: "#fff7d6" }}>
+                <b>注意：</b>
+                {result.ocr.note}
+              </div>
+            )}
+          </div>
 
-              {result.ocr.singles.map((r: any, i: number) => (
-                <div key={i} style={{ marginBottom: 20 }}>
-                  <b>
-                    {r.ok ? "✅" : "❌"} {r.name}
-                  </b>
+          {/* ★追加：analysis表示（カットなし追記） */}
+          {result?.analysis && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+                <div style={{ fontWeight: 900, marginBottom: 8 }}>📊 集計（analysis）</div>
 
-                  {/* ★追加：単発 成績表判定 */}
-                  {r.gradeCheck && (
-                    <div style={{ marginTop: 6 }}>
-                      判定：{" "}
-                      <b>{r.gradeCheck.isGradeReport ? "成績表っぽい ✅" : "成績表ではなさそう ❌"}</b>{" "}
-                      （信頼度 {r.gradeCheck.confidence}）
-                      <div style={hint}>理由：{r.gradeCheck.reason}</div>
+                <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12 }}>
+                  <div style={{ fontWeight: 800, marginBottom: 6 }}>単発（複数）の集計</div>
+
+                  {result.analysis.singles?.weakest ? (
+                    <div style={{ marginBottom: 8 }}>
+                      弱点（平均偏差値が低い）：
+                      <b>
+                        {result.analysis.singles.weakest.name}（
+                        {typeof result.analysis.singles.weakest.avgDeviation === "number"
+                          ? result.analysis.singles.weakest.avgDeviation.toFixed(1)
+                          : "-"}
+                        ）
+                      </b>
+                    </div>
+                  ) : (
+                    <div style={{ color: "#666", marginBottom: 8 }}>
+                      ※単発の成績JSONがまだ取れていないため、集計できませんでした
                     </div>
                   )}
 
-                  {r.ok ? <pre style={preStyle}>{r.text}</pre> : <div style={{ color: "crimson" }}>{r.error}</div>}
+                  {!!result.analysis.singles?.subjects?.length && (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
+                            科目
+                          </th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
+                            平均偏差値
+                          </th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
+                            直近偏差値
+                          </th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
+                            最低偏差値
+                          </th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
+                            件数
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.analysis.singles.subjects.map((s: any) => (
+                          <tr key={s.name}>
+                            <td style={{ padding: "6px 0" }}>{s.name}</td>
+                            <td style={{ textAlign: "right" }}>
+                              {typeof s.avgDeviation === "number" ? s.avgDeviation.toFixed(1) : "-"}
+                            </td>
+                            <td style={{ textAlign: "right" }}>
+                              {typeof s.lastDeviation === "number" ? s.lastDeviation.toFixed(1) : "-"}
+                            </td>
+                            <td style={{ textAlign: "right" }}>
+                              {typeof s.minDeviation === "number" ? s.minDeviation.toFixed(1) : "-"}
+                            </td>
+                            <td style={{ textAlign: "right" }}>{s.count ?? 0}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
-              ))}
-            </>
+
+                <div style={{ padding: 12, border: "1px solid #eee", borderRadius: 12, marginTop: 12 }}>
+                  <div style={{ fontWeight: 800, marginBottom: 6 }}>年間（1枚）の集計</div>
+
+                  {result.analysis.yearly?.weakest ? (
+                    <div>
+                      弱点（偏差値が低い）：
+                      <b>
+                        {result.analysis.yearly.weakest.name}（
+                        {typeof result.analysis.yearly.weakest.deviation === "number"
+                          ? result.analysis.yearly.weakest.deviation.toFixed(1)
+                          : "-"}
+                        ）
+                      </b>
+                    </div>
+                  ) : (
+                    <div style={{ color: "#666" }}>
+                      ※年間の成績JSONがまだ取れていないため、集計できませんでした
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
 
-          {result.ocr?.yearly && (
-            <>
-              <h3>年間成績 OCR結果</h3>
-              <pre style={preStyle}>{result.ocr.yearly}</pre>
-            </>
-          )}
+          {/* OCR / 判定 / JSON表示 */}
+          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {/* singles */}
+            <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 8 }}>単発（OCR/判定/JSON）</div>
 
-          {result.selections && (
-            <>
-              <h3>（デバッグ）選択設定</h3>
-              <pre style={preStyle}>{JSON.stringify(result.selections, null, 2)}</pre>
-            </>
-          )}
-        </section>
+              {result.ocr?.singles?.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {result.ocr.singles.map((r: any) => (
+                    <div key={r.path} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                      <div style={{ fontWeight: 800 }}>{r.name}</div>
+                      <div style={{ fontSize: 12, color: "#666" }}>{formatBytes(r.size)}</div>
+
+                      {"ok" in r && r.ok === false && (
+                        <div style={{ marginTop: 8, color: "#b00", fontWeight: 700 }}>
+                          OCR失敗：{r.error}
+                        </div>
+                      )}
+
+                      {"ok" in r && r.ok === true && (
+                        <>
+                          {r.gradeCheck && (
+                            <div style={{ marginTop: 8, fontSize: 13 }}>
+                              判定：{" "}
+                              <b style={{ color: r.gradeCheck.isGradeReport ? "#0a0" : "#b00" }}>
+                                {r.gradeCheck.isGradeReport ? "成績表" : "成績表ではない"}
+                              </b>{" "}
+                              （信頼度 {r.gradeCheck.confidence}）<br />
+                              <span style={{ color: "#555" }}>{r.gradeCheck.reason}</span>
+                            </div>
+                          )}
+
+                          {/* JSON */}
+                          {r.reportJson && (
+                            <>
+                              <div style={{ fontWeight: 800, marginTop: 10 }}>📦 抽出JSON</div>
+                              <pre
+                                style={{
+                                  whiteSpace: "pre-wrap",
+                                  background: "#f7f7f7",
+                                  padding: 12,
+                                  borderRadius: 10,
+                                  marginTop: 6,
+                                  fontSize: 12,
+                                }}
+                              >
+                                {JSON.stringify(r.reportJson, null, 2)}
+                              </pre>
+                            </>
+                          )}
+
+                          {r.reportJsonMeta && !r.reportJson && (
+                            <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+                              JSON化：{r.reportJsonMeta.error}
+                            </div>
+                          )}
+
+                          {/* OCR text */}
+                          <details style={{ marginTop: 10 }}>
+                            <summary style={{ cursor: "pointer", fontWeight: 700 }}>OCRテキストを表示</summary>
+                            <pre
+                              style={{
+                                whiteSpace: "pre-wrap",
+                                background: "#fcfcfc",
+                                padding: 12,
+                                borderRadius: 10,
+                                marginTop: 6,
+                                fontSize: 12,
+                              }}
+                            >
+                              {r.text}
+                            </pre>
+                          </details>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ color: "#666" }}>単発の結果はありません</div>
+              )}
+            </div>
+
+            {/* yearly */}
+            <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 8 }}>年間（OCR/判定/JSON）</div>
+
+              {!result.files?.yearly ? (
+                <div style={{ color: "#666" }}>年間はアップロードされていません</div>
+              ) : (
+                <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                  <div style={{ fontWeight: 800 }}>{result.files.yearly.name}</div>
+                  <div style={{ fontSize: 12, color: "#666" }}>{formatBytes(result.files.yearly.size)}</div>
+
+                  {result.ocr?.yearlyGradeCheck && (
+                    <div style={{ marginTop: 8, fontSize: 13 }}>
+                      判定：{" "}
+                      <b style={{ color: result.ocr.yearlyGradeCheck.isGradeReport ? "#0a0" : "#b00" }}>
+                        {result.ocr.yearlyGradeCheck.isGradeReport ? "成績表" : "成績表ではない"}
+                      </b>{" "}
+                      （信頼度 {result.ocr.yearlyGradeCheck.confidence}）<br />
+                      <span style={{ color: "#555" }}>{result.ocr.yearlyGradeCheck.reason}</span>
+                    </div>
+                  )}
+
+                  {result.ocr?.yearlyReportJson && (
+                    <>
+                      <div style={{ fontWeight: 800, marginTop: 10 }}>📦 年間 抽出JSON</div>
+                      <pre
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          background: "#f7f7f7",
+                          padding: 12,
+                          borderRadius: 10,
+                          marginTop: 6,
+                          fontSize: 12,
+                        }}
+                      >
+                        {JSON.stringify(result.ocr.yearlyReportJson, null, 2)}
+                      </pre>
+                    </>
+                  )}
+
+                  {result.ocr?.yearlyReportJsonMeta && !result.ocr.yearlyReportJson && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+                      JSON化：{result.ocr.yearlyReportJsonMeta.error}
+                    </div>
+                  )}
+
+                  {result.ocr?.yearly && (
+                    <details style={{ marginTop: 10 }}>
+                      <summary style={{ cursor: "pointer", fontWeight: 700 }}>OCRテキストを表示</summary>
+                      <pre
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          background: "#fcfcfc",
+                          padding: 12,
+                          borderRadius: 10,
+                          marginTop: 6,
+                          fontSize: 12,
+                        }}
+                      >
+                        {result.ocr.yearly}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
-
-/* =========================
-   styles
-========================= */
-const sectionStyle: React.CSSProperties = {
-  border: "1px solid #ddd",
-  borderRadius: 10,
-  padding: 16,
-  marginBottom: 24,
-};
-
-const sectionTitle: React.CSSProperties = {
-  fontSize: 18,
-  marginBottom: 12,
-};
-
-const boxStyle: React.CSSProperties = {
-  border: "1px dashed #ccc",
-  borderRadius: 8,
-  padding: 12,
-  marginBottom: 16,
-};
-
-const analyzeButton: React.CSSProperties = {
-  fontSize: 16,
-  padding: "12px 28px",
-  borderRadius: 8,
-  background: "#2563eb",
-  color: "#fff",
-  border: "none",
-};
-
-const pickButton: React.CSSProperties = {
-  padding: "8px 12px",
-  borderRadius: 8,
-  border: "1px solid #bbb",
-  background: "#fff",
-  cursor: "pointer",
-};
-
-const subButton: React.CSSProperties = {
-  padding: "8px 12px",
-  borderRadius: 8,
-  border: "1px solid #ddd",
-  background: "#f7f7f7",
-  cursor: "pointer",
-};
-
-const linkButton: React.CSSProperties = {
-  padding: 0,
-  border: "none",
-  background: "transparent",
-  color: "#2563eb",
-  cursor: "pointer",
-  textDecoration: "underline",
-  fontSize: 12,
-};
-
-const preStyle: React.CSSProperties = {
-  whiteSpace: "pre-wrap",
-  background: "#f7f7f7",
-  padding: 12,
-  borderRadius: 8,
-  marginTop: 10,
-};
-
-const hint: React.CSSProperties = {
-  fontSize: 13,
-  color: "#666",
-};
-
-const fileInfo: React.CSSProperties = {
-  fontSize: 12,
-  color: "#333",
-  marginTop: 6,
-};
