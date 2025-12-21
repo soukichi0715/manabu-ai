@@ -47,13 +47,13 @@ async function ocrPdfFromStorage(params: {
 
   const uploaded = await openai.files.create({
     file: await OpenAI.toFile(buf, filename, { type: "application/pdf" }),
-    // ★ あなたのSDKでは必須
+    // ★あなたの環境ではpurpose必須
     purpose: "assistants",
   });
 
   // 3) OCR（Responses API）
   const resp = await openai.responses.create({
-    // ★ OCRが成立するモデル
+    // ★ OCRが成立しやすいモデル
     model: "gpt-4.1",
     input: [
       {
@@ -71,16 +71,19 @@ async function ocrPdfFromStorage(params: {
     ],
   });
 
-  // 4) OpenAI側のファイルを掃除
+  // 4) OpenAI側のファイルを掃除（SDKでは delete）
   try {
     await openai.files.delete(uploaded.id);
-  } catch {}
+  } catch {
+    // 削除失敗しても致命的ではないので無視
+  }
 
+  // ※Responses API は output_text を使うのが型的に安全
   return typeof resp.output_text === "string" ? resp.output_text : "";
 }
 
 /* =========================
-   JSON schema
+   JSON schema（抽出）
 ========================= */
 type ReportJson = {
   docType: "report";
@@ -110,6 +113,9 @@ function safeParseJson<T>(text: string): T | null {
   }
 }
 
+/* =========================
+   ★追加：JSON Schema定義（response_format用）
+========================= */
 const REPORT_JSON_SCHEMA = {
   name: "ReportJson",
   schema: {
@@ -161,29 +167,47 @@ const REPORT_JSON_SCHEMA = {
           required: ["name", "score", "deviation", "avg", "rank"],
         },
       },
-      notes: { type: "array", items: { type: "string" } },
+      notes: {
+        type: "array",
+        items: { type: "string" },
+      },
     },
     required: ["docType", "student", "test", "overall", "subjects", "notes"],
   },
   strict: true,
 } as const;
 
-/* =========================
-   OCRテキスト → 成績表JSON
-========================= */
+const JUDGE_JSON_SCHEMA = {
+  name: "JudgeGradeReport",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      isGradeReport: { type: "boolean" },
+      confidence: { type: "number" },
+      reason: { type: "string" },
+    },
+    required: ["isGradeReport", "confidence", "reason"],
+  },
+  strict: true,
+} as const;
+
+/** OCRテキストから成績表JSONを抽出（MVP） */
 async function extractReportJsonFromText(params: {
   filename: string;
   extractedText: string;
 }) {
   const { filename, extractedText } = params;
 
+  // 長すぎると遅くなるので適度に圧縮（先頭＋末尾）
   const head = extractedText.slice(0, 4000);
   const tail = extractedText.slice(-4000);
   const snippet = `${head}\n...\n${tail}`;
 
   const resp = await openai.responses.create(
     {
-      model: "gpt-4.1",
+      model: "gpt-4.1-mini",
+      // ★修正ポイント：ここでJSONを強制（フォーマット不正を潰す）
       response_format: {
         type: "json_schema",
         json_schema: REPORT_JSON_SCHEMA,
@@ -192,47 +216,645 @@ async function extractReportJsonFromText(params: {
         {
           role: "system",
           content:
-            "あなたは学習塾の成績表データ化担当です。推測は禁止。読めない項目は null にしてください。",
+            "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
+            "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。",
         },
         {
           role: "user",
           content:
-            `ファイル名: ${filename}\n\nOCRテキスト:\n` + snippet,
+            `ファイル名: ${filename}\n\n` +
+            "次のOCRテキストから成績表の情報を抽出してください。\n" +
+            "ルール:\n" +
+            "- 取れない項目は null\n" +
+            "- 数字は可能なら number（例: 54.3）\n" +
+            "- 科目は配列 subjects にまとめる（科目名、得点、偏差値、平均、順位）\n" +
+            "- notes は補足を短く（例：『算数の偏差値が欠落』など）\n\n" +
+            "OCRテキスト:\n" +
+            snippet,
         },
       ],
-    } as any // ★ response_format 型エラー回避
+    } as any // ★ SDKが古くてresponse_format型が無い場合の回避
   );
 
   const out = (resp.output_text ?? "").trim();
-  const parsed = safeParseJson<ReportJson>(out);
 
-  if (!parsed) {
+  const parsed = safeParseJson<ReportJson>(out);
+  if (!parsed || parsed.docType !== "report") {
     return {
       ok: false as const,
-      reportJson: null,
-      error: "JSON解析失敗",
+      reportJson: null as ReportJson | null,
+      error: "JSONの解析に失敗（フォーマット不正）",
       raw: out,
     };
   }
 
+  // 最低限の整形（subjects.nameが空なら弾くなど）
+  if (!Array.isArray(parsed.subjects)) parsed.subjects = [];
+  parsed.subjects = parsed.subjects
+    .filter((s) => s && typeof s.name === "string" && s.name.trim().length > 0)
+    .map((s) => ({
+      name: s.name.trim(),
+      score: typeof s.score === "number" ? s.score : null,
+      deviation: typeof s.deviation === "number" ? s.deviation : null,
+      avg: typeof s.avg === "number" ? s.avg : null,
+      rank: typeof s.rank === "number" ? s.rank : null,
+    }));
+
   return {
     ok: true as const,
     reportJson: parsed,
-    raw: out,
+    raw: out, // デバッグ用（必要なければ後で消す）
   };
 }
 
 /* =========================
-   Handler（暫定：動作確認用）
+   成績表判定
+========================= */
+/** OCRテキストから「成績表っぽいか？」判定（ハード判定→LLM） */
+async function judgeGradeReport(params: {
+  filename: string;
+  extractedText: string;
+}) {
+  const { filename, extractedText } = params;
+
+  // 先頭+末尾（抜け道対策）
+  const head = extractedText.slice(0, 3000);
+  const tail = extractedText.slice(-3000);
+  const snippet = `${head}\n...\n${tail}`;
+
+  if (!snippet.trim()) {
+    return {
+      isGradeReport: false,
+      confidence: 10,
+      reason: "OCR結果がほぼ空でした（判定材料不足）",
+    };
+  }
+
+  // -----------------------------
+  // 0) ハード判定（強制false）
+  // -----------------------------
+  const NG_PATTERNS = [
+    /入学試験|入試|選抜|試験問題|問題用紙|問題冊子/,
+    /解答用紙|解答欄|解答用|解答用紙/,
+    /配点|大問|小問|設問|注意事項/,
+    /記入しないこと|記入しない|以下に記入|採点者/,
+  ];
+
+  const hasNg = NG_PATTERNS.some((re) => re.test(snippet));
+  if (hasNg) {
+    return {
+      isGradeReport: false,
+      confidence: 95,
+      reason:
+        "本文に「入試/問題用紙/解答用紙/配点/大問」等の語があり、成績表ではなく試験資料の可能性が高い",
+    };
+  }
+
+  // -----------------------------
+  // 1) 成績表っぽい “肯定根拠” が薄い場合はfalse寄り
+  // -----------------------------
+  const POSITIVE_HINTS = [
+    /偏差値/,
+    /順位/,
+    /平均点|平均との差/,
+    /得点|点数/,
+    /正答率/,
+    /判定|志望校判定/,
+    /成績推移|推移|学習状況/,
+    /科目|国語|算数|理科|社会/,
+  ];
+
+  const posCount = POSITIVE_HINTS.reduce(
+    (acc, re) => acc + (re.test(snippet) ? 1 : 0),
+    0
+  );
+
+  if (posCount < 2) {
+    return {
+      isGradeReport: false,
+      confidence: 70,
+      reason:
+        "偏差値/順位/平均点/判定など成績表の典型語が少なく、成績表の根拠が弱い",
+    };
+  }
+
+  // -----------------------------
+  // 2) LLMで最終判定（補助）
+  // -----------------------------
+  const resp = await openai.responses.create(
+    {
+      model: "gpt-4.1-mini",
+      // ★修正ポイント：判定もJSON schemaで固定（フォーマット不正を潰す）
+      response_format: {
+        type: "json_schema",
+        json_schema: JUDGE_JSON_SCHEMA,
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/順位など）』かどうかを判定する担当です。" +
+            "推測しすぎず、本文から根拠語を示して判定してください。",
+        },
+        {
+          role: "user",
+          content:
+            "次のOCRテキストは、アップロードされたPDFの内容です。\n" +
+            "ファイル名: " +
+            filename +
+            "\n\n" +
+            "OCRテキスト（抜粋）:\n" +
+            snippet +
+            "\n\n" +
+            "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
+            "これらが本文に含まれる場合は isGradeReport=false にしてください。\n" +
+            "成績表の根拠は『偏差値』『順位』『平均点』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n",
+        },
+      ],
+    } as any // ★ SDKが古くてresponse_format型が無い場合の回避
+  );
+
+  const txt = (resp.output_text ?? "").trim();
+
+  try {
+    const obj = JSON.parse(txt);
+    return {
+      isGradeReport: Boolean(obj.isGradeReport),
+      confidence: Number.isFinite(obj.confidence)
+        ? Math.max(0, Math.min(100, Number(obj.confidence)))
+        : 50,
+      reason:
+        typeof obj.reason === "string" ? obj.reason : "理由の取得に失敗しました",
+    };
+  } catch {
+    return {
+      isGradeReport: false,
+      confidence: 30,
+      reason: "判定JSONの解析に失敗（フォーマット不正）",
+    };
+  }
+}
+
+/* =========================
+   集計（analysis）
+========================= */
+type SubjectAgg = {
+  name: string;
+  count: number;
+  avgDeviation: number | null;
+  lastDeviation: number | null;
+  minDeviation: number | null;
+};
+
+function safeNum(n: any): number | null {
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+function mergeAgg(a: SubjectAgg, dev: number | null): SubjectAgg {
+  if (dev === null) return a;
+
+  const newCount = a.count + 1;
+  const newAvg =
+    a.avgDeviation === null ? dev : (a.avgDeviation * a.count + dev) / newCount;
+
+  const newMin = a.minDeviation === null ? dev : Math.min(a.minDeviation, dev);
+
+  return {
+    ...a,
+    count: newCount,
+    avgDeviation: newAvg,
+    lastDeviation: dev,
+    minDeviation: newMin,
+  };
+}
+
+function analyzeSinglesReportJson(
+  singles: Array<{ reportJson?: any; filename?: string }>
+) {
+  const map = new Map<string, SubjectAgg>();
+
+  for (const s of singles) {
+    const r = s.reportJson;
+    if (!r || !Array.isArray(r.subjects)) continue;
+
+    for (const subj of r.subjects) {
+      const name = String(subj?.name ?? "").trim();
+      if (!name) continue;
+
+      const dev = safeNum(subj?.deviation);
+      const cur =
+        map.get(name) ??
+        ({
+          name,
+          count: 0,
+          avgDeviation: null,
+          lastDeviation: null,
+          minDeviation: null,
+        } as SubjectAgg);
+
+      map.set(name, mergeAgg(cur, dev));
+    }
+  }
+
+  const subjects = Array.from(map.values());
+
+  // 平均偏差値が低い順（nullは最後）
+  subjects.sort((a, b) => {
+    const av = a.avgDeviation ?? 9999;
+    const bv = b.avgDeviation ?? 9999;
+    return av - bv;
+  });
+
+  const weakest = subjects[0]?.avgDeviation != null ? subjects[0] : null;
+
+  return { subjects, weakest };
+}
+
+function analyzeYearlyReportJson(yearly: any) {
+  if (!yearly || !Array.isArray(yearly.subjects)) {
+    return { subjects: [], weakest: null };
+  }
+
+  const subjects = yearly.subjects
+    .map((s: any) => ({
+      name: String(s?.name ?? "").trim(),
+      deviation: safeNum(s?.deviation),
+      score: safeNum(s?.score),
+      avg: safeNum(s?.avg),
+      rank: safeNum(s?.rank),
+    }))
+    .filter((s: any) => s.name);
+
+  const sorted = [...subjects].sort((a, b) => {
+    const av = a.deviation ?? 9999;
+    const bv = b.deviation ?? 9999;
+    return av - bv;
+  });
+
+  return {
+    subjects,
+    weakest: sorted[0]?.deviation != null ? sorted[0] : null,
+  };
+}
+
+/* =========================
+   講評生成（commentary）
+========================= */
+type Tone = "gentle" | "balanced" | "strict";
+type Target = "student" | "parent" | "teacher";
+type FocusAxis = "mistake" | "process" | "knowledge" | "attitude";
+
+function toneLabel(t: Tone) {
+  if (t === "gentle") return "優しめ（共感多め）";
+  if (t === "strict") return "厳しめ（改善点を明確に）";
+  return "バランス（優しさ7：厳しさ3）";
+}
+function targetLabel(t: Target) {
+  if (t === "parent") return "保護者向け";
+  if (t === "teacher") return "講師/社内向け";
+  return "子ども向け";
+}
+function focusLabel(f: FocusAxis) {
+  switch (f) {
+    case "mistake":
+      return "ミス分析";
+    case "process":
+      return "思考プロセス";
+    case "knowledge":
+      return "知識/定着";
+    case "attitude":
+      return "姿勢/習慣";
+    default:
+      return f;
+  }
+}
+
+async function generateCommentary(params: {
+  tone: Tone;
+  target: Target;
+  focus: FocusAxis[];
+  singleAnalysis: any;
+  yearlyAnalysis: any;
+  singlesReportJson: Array<{ name: string; reportJson: ReportJson | null }>;
+  yearlyReportJson: ReportJson | null;
+}) {
+  const {
+    tone,
+    target,
+    focus,
+    singleAnalysis,
+    yearlyAnalysis,
+    singlesReportJson,
+    yearlyReportJson,
+  } = params;
+
+  // 送る情報は「JSON中心」に絞る（OCR全文は渡さない＝速く安定）
+  const payload = {
+    settings: {
+      tone,
+      toneLabel: toneLabel(tone),
+      target,
+      targetLabel: targetLabel(target),
+      focus: focus.map((x) => ({ key: x, label: focusLabel(x) })),
+    },
+    analysis: {
+      singles: singleAnalysis,
+      yearly: yearlyAnalysis,
+    },
+    // 重くならないように、単発JSONは科目だけ抽出
+    singles: singlesReportJson.map((x) => ({
+      name: x.name,
+      subjects: x.reportJson?.subjects ?? null,
+      overall: x.reportJson?.overall ?? null,
+      test: x.reportJson?.test ?? null,
+    })),
+    yearly: yearlyReportJson
+      ? {
+          subjects: yearlyReportJson.subjects,
+          overall: yearlyReportJson.overall,
+          test: yearlyReportJson.test,
+        }
+      : null,
+  };
+
+  const system = `
+あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
+
+◆最重要の価値観
+・「正しく解く力」よりも、「自分で考える力」を育てることを最優先にする。
+・ミスは責めず、「次に伸びるヒント」として扱う。
+
+◆話し方・トーン
+・基本はやさしくフランク（優しさ7：厳しさ3）。ただし指摘すべき点は明確に。
+・ユーザー設定 tone/target を必ず反映。
+
+◆出力ルール
+・日本語
+・余計な前置きなし
+・以下の構成で出す（対象に応じて言い回し調整）
+  1) まず一言（共感/現状）
+  2) 事実（数値の要約：弱点科目や平均偏差値など）
+  3) 原因仮説（focusに沿って2〜4個）
+  4) 次の一手（今日/今週でできる行動。具体）
+  5) 最後に一言（対話を続ける問いかけ）
+・数値がnullのものは無理に決めつけない。「未取得」と言う。
+  `.trim();
+
+  const user = `
+以下は成績表JSONと集計結果です。
+このデータを元に「まなぶ先生AI」として講評を書いてください。
+
+【データ(JSON)】
+${JSON.stringify(payload, null, 2)}
+`.trim();
+
+  const resp = await openai.responses.create({
+    model: "gpt-4.1-mini",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  return typeof resp.output_text === "string" ? resp.output_text.trim() : "";
+}
+
+/* =========================
+   Handler
 ========================= */
 export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
+    /* ---------- UIからの入力 ---------- */
+
+    // 単発：複数
+    const singleFiles = fd
+      .getAll("single")
+      .filter((v): v is File => v instanceof File);
+
+    // 年間：1枚
+    const yearlyFileRaw = fd.get("yearly");
+    const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
+
+    // 講師設定
+    const tone = (fd.get("tone")?.toString() ?? "gentle") as Tone;
+    const target = (fd.get("target")?.toString() ?? "student") as Target;
+
+    let focus: FocusAxis[] = [];
+    try {
+      focus = JSON.parse(fd.get("focus")?.toString() ?? "[]");
+      if (!Array.isArray(focus)) focus = [];
+    } catch {
+      focus = [];
+    }
+
+    if (singleFiles.length === 0 && !yearlyFile) {
+      return new NextResponse("PDFがありません。", { status: 400 });
+    }
+
+    /* ---------- Storage ---------- */
+    const bucket = process.env.SUPABASE_PDF_BUCKET ?? "report-pdfs";
+    const baseDir = `analyze/${crypto.randomUUID()}`;
+
+    async function upload(file: File) {
+      const ab = await file.arrayBuffer();
+      const path = `${baseDir}/${safeName(file.name)}`;
+
+      const { error } = await supabase.storage.from(bucket).upload(path, ab, {
+        contentType: file.type || "application/pdf",
+        upsert: true,
+      });
+
+      if (error) throw new Error(error.message);
+
+      return { path, name: file.name, size: file.size };
+    }
+
+    /* ---------- Upload ---------- */
+    const uploadedSingles: { path: string; name: string; size: number }[] = [];
+    for (const f of singleFiles) uploadedSingles.push(await upload(f));
+
+    const uploadedYearly = yearlyFile ? await upload(yearlyFile) : null;
+
+    /* ---------- OCR + 成績表判定 + JSON化 ---------- */
+
+    // 単発は枚数制限（Vercelタイムアウト対策）
+    const MAX_SINGLE_OCR = 5;
+    const singleTargets = uploadedSingles.slice(0, MAX_SINGLE_OCR);
+
+    const singleOcrResults: any[] = [];
+    for (const f of singleTargets) {
+      try {
+        const text = await ocrPdfFromStorage({
+          bucket,
+          path: f.path,
+          filename: f.name,
+        });
+
+        const gradeCheck = await judgeGradeReport({
+          filename: f.name,
+          extractedText: text,
+        });
+
+        let reportJson: ReportJson | null = null;
+        let reportJsonMeta: { ok: boolean; error: string | null } | null = null;
+
+        if (gradeCheck.isGradeReport) {
+          const extracted = await extractReportJsonFromText({
+            filename: f.name,
+            extractedText: text,
+          });
+
+          reportJson = extracted.reportJson;
+          reportJsonMeta = {
+            ok: extracted.ok,
+            error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+          };
+        } else {
+          reportJson = null;
+          reportJsonMeta = {
+            ok: false,
+            error: "成績表ではないためJSON化をスキップ",
+          };
+        }
+
+        singleOcrResults.push({
+          ...f,
+          ok: true,
+          text,
+          gradeCheck,
+          reportJson,
+          reportJsonMeta,
+        });
+      } catch (e: any) {
+        singleOcrResults.push({
+          ...f,
+          ok: false,
+          error: e?.message ?? "OCR error",
+          gradeCheck: {
+            isGradeReport: false,
+            confidence: 0,
+            reason: "OCRに失敗したため判定できません",
+          },
+        });
+      }
+    }
+
+    let yearlyOcrText: string | null = null;
+    let yearlyGradeCheck:
+      | { isGradeReport: boolean; confidence: number; reason: string }
+      | null = null;
+    let yearlyReportJson: ReportJson | null = null;
+    let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null =
+      null;
+
+    if (uploadedYearly) {
+      try {
+        yearlyOcrText = await ocrPdfFromStorage({
+          bucket,
+          path: uploadedYearly.path,
+          filename: uploadedYearly.name,
+        });
+
+        yearlyGradeCheck = await judgeGradeReport({
+          filename: uploadedYearly.name,
+          extractedText: yearlyOcrText,
+        });
+
+        if (yearlyOcrText && yearlyGradeCheck?.isGradeReport) {
+          const extracted = await extractReportJsonFromText({
+            filename: uploadedYearly.name,
+            extractedText: yearlyOcrText,
+          });
+
+          yearlyReportJson = extracted.reportJson;
+          yearlyReportJsonMeta = {
+            ok: extracted.ok,
+            error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+          };
+        } else {
+          yearlyReportJson = null;
+          yearlyReportJsonMeta = {
+            ok: false,
+            error: "成績表ではないためJSON化をスキップ",
+          };
+        }
+      } catch (e: any) {
+        yearlyOcrText = null;
+        yearlyGradeCheck = {
+          isGradeReport: false,
+          confidence: 0,
+          reason: "OCRに失敗したため判定できません",
+        };
+      }
+    }
+
+    /* ---------- ②: JSONを使った分析集計（returnの直前で計算） ---------- */
+    const singleJsonItems = (singleOcrResults ?? []).map((x: any) => ({
+      filename: x.name, // ★ x.filename ではなく x.name
+      reportJson: x.reportJson,
+    }));
+
+    const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
+    const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
+
+    /* ---------- ★追加：講評生成（commentary） ---------- */
+    const singlesReportJson = (singleOcrResults ?? []).map((x: any) => ({
+      name: x.name,
+      reportJson: x.reportJson as ReportJson | null,
+    }));
+
+    // ※講評は「成績表のJSONが1つも無い」場合、薄くなるのでガード
+    const hasAnyReportJson =
+      singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
+
+    const commentary = hasAnyReportJson
+      ? await generateCommentary({
+          tone,
+          target,
+          focus,
+          singleAnalysis,
+          yearlyAnalysis,
+          singlesReportJson,
+          yearlyReportJson,
+        })
+      : "成績表として読み取れたデータがまだありません。成績表PDFを入れてもう一度試してみてください。";
+
+    /* ---------- Response ---------- */
     return NextResponse.json({
-      ok: true,
-      message:
-        "route.ts はビルド可能です。次は OCR 実行と JSON 抽出を確認してください。",
+      summary: `単発=${uploadedSingles.length}枚 / 年間=${
+        uploadedYearly ? "あり" : "なし"
+      }`,
+      files: {
+        singles: uploadedSingles,
+        yearly: uploadedYearly,
+      },
+      ocr: {
+        singles: singleOcrResults,
+        yearly: yearlyOcrText,
+        yearlyGradeCheck,
+        yearlyReportJson,
+        yearlyReportJsonMeta,
+        note:
+          uploadedSingles.length > MAX_SINGLE_OCR
+            ? `単発PDFが多いため、先頭${MAX_SINGLE_OCR}枚のみOCRしました`
+            : null,
+      },
+
+      selections: {
+        tone,
+        focus,
+        target,
+      },
+
+      analysis: {
+        singles: singleAnalysis,
+        yearly: yearlyAnalysis,
+      },
+
+      // ★追加：講評（まなぶ先生AI）
+      commentary,
     });
   } catch (e: any) {
     return new NextResponse(e?.message ?? "Server error", { status: 500 });
