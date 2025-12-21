@@ -30,10 +30,16 @@ function clampNum(n: any, min: number, max: number): number | null {
   return n;
 }
 
+// ★強化：育成/公開が文中に混ざるケースでも寄せる
 function normalizeTestTypeLabel(s: string) {
   const t = String(s ?? "").replace(/\s+/g, "");
-  if (/(育成テスト|学習力育成テスト)/.test(t)) return "ikusei";
-  if (/(公開模試|公開模擬試験)/.test(t)) return "kokai_moshi";
+
+  // 育成
+  if (/(育成テスト|学習力育成テスト|育成)/.test(t)) return "ikusei";
+
+  // 公開
+  if (/(公開模試|公開模擬試験|公開)/.test(t)) return "kokai_moshi";
+
   return "other";
 }
 
@@ -287,23 +293,13 @@ const JUDGE_JSON_SCHEMA = {
 } as const;
 
 /* =========================
-   Extract report JSON
+   Extract report JSON（★育成/公開だけに寄せる）
 ========================= */
 
-// ★ここが TS2339対策：成功/失敗どちらも error を必ず持つ
+// ★ TS2339対策：成功/失敗どちらも error を必ず持つ
 type ExtractResult =
-  | {
-      ok: true;
-      reportJson: JukuReportJson;
-      raw: string;
-      error: null;
-    }
-  | {
-      ok: false;
-      reportJson: null;
-      raw: string;
-      error: string;
-    };
+  | { ok: true; reportJson: JukuReportJson; raw: string; error: null }
+  | { ok: false; reportJson: null; raw: string; error: string };
 
 async function extractJukuReportJsonFromText(params: {
   filename: string;
@@ -311,35 +307,31 @@ async function extractJukuReportJsonFromText(params: {
 }): Promise<ExtractResult> {
   const { filename, extractedText } = params;
 
-  const endPatterns = [
-    /^II\./,
-    /^III\./,
-    /^IV\./,
-    /^V\./,
-    /^VI\./,
-    /^VII\./,
-    /^期末テスト/,
-    /^累計/,
-    /^欠席/,
-    /^出席率/,
+  // ★終端候補：学校の定期テスト/出欠/統計が出たらそこで切る
+  const endPatterns: RegExp[] = [
+    /期末|中間|定期|評価|内申|5科|9科|英語|美術|体育|技家/,
+    /欠席|遅刻|早退|出席率|教科出席率/,
+    /^II\.|^III\.|^IV\.|^V\.|^VI\.|^VII\./,
     /^＜/,
     /^【/,
   ];
 
+  // ★「育成」「公開」の開始を強めに拾う
   const ikuseiSection = extractSection(
     extractedText,
-    [/育成テスト|学習力育成テスト/],
+    [/育成テスト|学習力育成テスト|育成/],
     endPatterns
   );
 
   const kokaiSection = extractSection(
     extractedText,
-    [/公開模試|公開模擬試験/],
+    [/公開模試|公開模擬試験|公開/],
     endPatterns
   );
 
-  const fallbackHead = extractedText.slice(0, 5000);
-  const fallbackTail = extractedText.slice(-5000);
+  // どっちも取れない時の保険（短め）
+  const fallbackHead = extractedText.slice(0, 3500);
+  const fallbackTail = extractedText.slice(-3500);
   const fallbackSnippet = `${fallbackHead}\n...\n${fallbackTail}`;
 
   const snippet =
@@ -350,16 +342,19 @@ async function extractJukuReportJsonFromText(params: {
       .filter(Boolean)
       .join("\n\n----------------\n\n") || fallbackSnippet;
 
+  // ★ LLM抽出：学校の定期テストは絶対に作らない（最重要）
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
       {
         role: "system",
         content:
-          "あなたは中学受験塾の成績表データ化担当です。OCRテキストから『育成テスト』『公開模試』の成績を構造化JSONにします。" +
+          "あなたは中学受験塾の成績表データ化担当です。" +
+          "OCRテキストから『育成テスト』『公開模試』の成績だけをJSON化します。" +
+          "【超重要】学校の定期テスト（期末/中間/定期/評価/内申/5科/9科/英語/美術/体育/技家）は絶対に抽出しない。" +
           "推測は禁止。見えない/不明はnull。空欄はnull。" +
           "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。" +
-          "『偏差』表記も deviation として扱う。",
+          "tests は最大2つ（育成・公開）まで。該当が無ければ tests は空配列にする。",
       },
       {
         role: "user",
@@ -371,7 +366,7 @@ async function extractJukuReportJsonFromText(params: {
           snippet,
       },
     ],
-    // ★ response_format は使わず text.format を使う（あなたのエラー対策）
+    // ★ response_format は使わず text.format を使う（あなたの400エラー対策）
     text: {
       format: {
         type: "json_schema",
@@ -394,13 +389,39 @@ async function extractJukuReportJsonFromText(params: {
     };
   }
 
-  // バリデーション（変な値をnullにする）
+  // ---- 抽出後の安全ネット：育成/公開以外は削除（ここが効く） ----
+  const isJukuTest = (t: any) => {
+    const testName = String(t?.testName ?? "");
+    const testType = String(t?.testType ?? "");
+    const joined = (testName + " " + testType).replace(/\s+/g, "");
+
+    const looksJuku =
+      /(育成|育成テスト|学習力育成テスト|公開|公開模試|公開模擬試験)/.test(joined);
+
+    const looksSchool =
+      /(期末|中間|定期|評価|内申|5科|9科|英語|美術|体育|技家)/.test(joined);
+
+    if (looksSchool) return false;
+    return looksJuku;
+  };
+
+  parsed.tests = (parsed.tests ?? [])
+    .map((t) => ({
+      ...t,
+      testType: normalizeTestTypeLabel(t.testType || t.testName || "other") as any,
+    }))
+    .filter(isJukuTest);
+
+  // ikusei -> kokai -> other の順
+  const order: Record<string, number> = { ikusei: 0, kokai_moshi: 1, other: 9 };
+  parsed.tests.sort((a: any, b: any) => (order[a.testType] ?? 9) - (order[b.testType] ?? 9));
+
+  // meta補正
   parsed.meta = parsed.meta ?? { sourceFilename: filename, title: null };
   if (parsed.meta.sourceFilename == null) parsed.meta.sourceFilename = filename;
 
+  // 値のバリデーション（変な値はnull）
   for (const t of parsed.tests ?? []) {
-    t.testType = normalizeTestTypeLabel(t.testType) as any;
-
     t.subjects = (t.subjects ?? []).map((s) => {
       const name = (["国語", "算数", "理科", "社会"].includes(s.name)
         ? s.name
@@ -458,7 +479,7 @@ async function extractJukuReportJsonFromText(params: {
 }
 
 /* =========================
-   Judge grade report（誤判定対策済み）
+   成績表判定（誤判定対策済み）
 ========================= */
 async function judgeGradeReport(params: { filename: string; extractedText: string }) {
   const { filename, extractedText } = params;
@@ -468,15 +489,22 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
   const snippet = `${head}\n...\n${tail}`;
 
   if (!snippet.trim()) {
-    return { isGradeReport: false, confidence: 10, reason: "OCR結果がほぼ空でした（判定材料不足）" };
+    return {
+      isGradeReport: false,
+      confidence: 10,
+      reason: "OCR結果がほぼ空でした（判定材料不足）",
+    };
   }
 
+  // ★まず「育成/公開」があるか（あれば強制的に成績表寄り）
   const hasJukuKeywords =
-    /(育成テスト|学習力育成テスト|公開模試|公開模擬試験)/.test(snippet);
+    /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開)/.test(snippet);
 
+  // 成績表の根拠語
   const hasScoreSignals =
     /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会)/.test(snippet);
 
+  // 問題冊子っぽさが強い語（「問題」単体はNGにしない）
   const strongExamDocSignals =
     /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
 
@@ -484,7 +512,8 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return {
       isGradeReport: true,
       confidence: 98,
-      reason: "育成テスト/公開模試と、偏差・順位・平均・得点など成績表の根拠語が確認できたため",
+      reason:
+        "育成テスト/公開模試と、偏差・順位・平均・得点など成績表の根拠語が確認できたため",
     };
   }
 
@@ -492,10 +521,12 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return {
       isGradeReport: false,
       confidence: 90,
-      reason: "問題用紙/解答用紙/設問/配点/注意事項など試験資料の特徴が強く、成績指標語が弱いため",
+      reason:
+        "問題用紙/解答用紙/設問/配点/注意事項など試験資料の特徴が強く、成績指標語が弱いため",
     };
   }
 
+  // 最終判定（LLM）
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
@@ -532,11 +563,18 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     const obj = JSON.parse(txt);
     return {
       isGradeReport: Boolean(obj.isGradeReport),
-      confidence: Number.isFinite(obj.confidence) ? Math.max(0, Math.min(100, Number(obj.confidence))) : 50,
-      reason: typeof obj.reason === "string" ? obj.reason : "理由の取得に失敗しました",
+      confidence: Number.isFinite(obj.confidence)
+        ? Math.max(0, Math.min(100, Number(obj.confidence)))
+        : 50,
+      reason:
+        typeof obj.reason === "string" ? obj.reason : "理由の取得に失敗しました",
     };
   } catch {
-    return { isGradeReport: false, confidence: 30, reason: "判定JSONの解析に失敗（フォーマット不正）" };
+    return {
+      isGradeReport: false,
+      confidence: 30,
+      reason: "判定JSONの解析に失敗（フォーマット不正）",
+    };
   }
 }
 
@@ -559,10 +597,17 @@ function mergeAgg(a: SubjectAgg, dev: number | null): SubjectAgg {
   if (dev === null) return a;
 
   const newCount = a.count + 1;
-  const newAvg = a.avgDeviation === null ? dev : (a.avgDeviation * a.count + dev) / newCount;
+  const newAvg =
+    a.avgDeviation === null ? dev : (a.avgDeviation * a.count + dev) / newCount;
   const newMin = a.minDeviation === null ? dev : Math.min(a.minDeviation, dev);
 
-  return { ...a, count: newCount, avgDeviation: newAvg, lastDeviation: dev, minDeviation: newMin };
+  return {
+    ...a,
+    count: newCount,
+    avgDeviation: newAvg,
+    lastDeviation: dev,
+    minDeviation: newMin,
+  };
 }
 
 function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
@@ -578,7 +623,9 @@ function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
   return rows;
 }
 
-function analyzeSinglesReportJson(singles: Array<{ reportJson?: any; filename?: string }>) {
+function analyzeSinglesReportJson(
+  singles: Array<{ reportJson?: any; filename?: string }>
+) {
   const map = new Map<string, SubjectAgg>();
 
   for (const s of singles) {
@@ -592,7 +639,13 @@ function analyzeSinglesReportJson(singles: Array<{ reportJson?: any; filename?: 
       const dev = safeNum(subj?.deviation);
       const cur =
         map.get(name) ??
-        ({ name, count: 0, avgDeviation: null, lastDeviation: null, minDeviation: null } as SubjectAgg);
+        ({
+          name,
+          count: 0,
+          avgDeviation: null,
+          lastDeviation: null,
+          minDeviation: null,
+        } as SubjectAgg);
 
       map.set(name, mergeAgg(cur, dev));
     }
@@ -617,7 +670,13 @@ function analyzeYearlyReportJson(yearly: any) {
       const dev = safeNum(row.deviation);
       const cur =
         map.get(name) ??
-        ({ name, count: 0, avgDeviation: null, lastDeviation: null, minDeviation: null } as SubjectAgg);
+        ({
+          name,
+          count: 0,
+          avgDeviation: null,
+          lastDeviation: null,
+          minDeviation: null,
+        } as SubjectAgg);
 
       map.set(name, mergeAgg(cur, dev));
     }
@@ -629,7 +688,8 @@ function analyzeYearlyReportJson(yearly: any) {
     return { subjects, weakest };
   }
 
-  if (!yearly || !Array.isArray(yearly.subjects)) return { subjects: [], weakest: null };
+  if (!yearly || !Array.isArray(yearly.subjects))
+    return { subjects: [], weakest: null };
 
   const subjects = yearly.subjects
     .map((s: any) => ({
@@ -691,7 +751,15 @@ async function generateCommentary(params: {
   singlesReportJson: Array<{ name: string; reportJson: any | null }>;
   yearlyReportJson: any | null;
 }) {
-  const { tone, target, focus, singleAnalysis, yearlyAnalysis, singlesReportJson, yearlyReportJson } = params;
+  const {
+    tone,
+    target,
+    focus,
+    singleAnalysis,
+    yearlyAnalysis,
+    singlesReportJson,
+    yearlyReportJson,
+  } = params;
 
   const payload = {
     settings: {
@@ -702,7 +770,10 @@ async function generateCommentary(params: {
       focus: focus.map((x) => ({ key: x, label: focusLabel(x) })),
     },
     analysis: { singles: singleAnalysis, yearly: yearlyAnalysis },
-    singles: singlesReportJson.map((x) => ({ name: x.name, reportJson: x.reportJson })),
+    singles: singlesReportJson.map((x) => ({
+      name: x.name,
+      reportJson: x.reportJson,
+    })),
     yearly: yearlyReportJson,
   };
 
@@ -740,7 +811,9 @@ export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
-    const singleFiles = fd.getAll("single").filter((v): v is File => v instanceof File);
+    const singleFiles = fd
+      .getAll("single")
+      .filter((v): v is File => v instanceof File);
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
 
@@ -785,29 +858,53 @@ export async function POST(req: NextRequest) {
     const singleOcrResults: any[] = [];
     for (const f of singleTargets) {
       try {
-        const text = await ocrPdfFromStorage({ bucket, path: f.path, filename: f.name });
-        const gradeCheck = await judgeGradeReport({ filename: f.name, extractedText: text });
+        const text = await ocrPdfFromStorage({
+          bucket,
+          path: f.path,
+          filename: f.name,
+        });
+        const gradeCheck = await judgeGradeReport({
+          filename: f.name,
+          extractedText: text,
+        });
 
         let reportJson: any | null = null;
         let reportJsonMeta: { ok: boolean; error: string | null } | null = null;
 
         if (gradeCheck.isGradeReport) {
-          const extracted = await extractJukuReportJsonFromText({ filename: f.name, extractedText: text });
+          const extracted = await extractJukuReportJsonFromText({
+            filename: f.name,
+            extractedText: text,
+          });
           reportJson = extracted.reportJson;
-          reportJsonMeta = { ok: extracted.ok, error: extracted.ok ? null : extracted.error ?? "JSON化に失敗" };
+          reportJsonMeta = {
+            ok: extracted.ok,
+            error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+          };
         } else {
           reportJson = null;
           reportJsonMeta = { ok: false, error: "成績表ではないためJSON化をスキップ" };
         }
 
-        singleOcrResults.push({ ...f, ok: true, text, gradeCheck, reportJson, reportJsonMeta });
+        singleOcrResults.push({
+          ...f,
+          ok: true,
+          text,
+          gradeCheck,
+          reportJson,
+          reportJsonMeta,
+        });
       } catch (e: any) {
         console.error("[single OCR error]", f?.name, e);
         singleOcrResults.push({
           ...f,
           ok: false,
           error: e?.message ?? "OCR error",
-          gradeCheck: { isGradeReport: false, confidence: 0, reason: "OCRに失敗したため判定できません" },
+          gradeCheck: {
+            isGradeReport: false,
+            confidence: 0,
+            reason: "OCRに失敗したため判定できません",
+          },
         });
       }
     }
@@ -816,13 +913,19 @@ export async function POST(req: NextRequest) {
     let yearlyOcrError: string | null = null;
     let yearlyJudgeError: string | null = null;
 
-    let yearlyGradeCheck: { isGradeReport: boolean; confidence: number; reason: string } | null = null;
+    let yearlyGradeCheck:
+      | { isGradeReport: boolean; confidence: number; reason: string }
+      | null = null;
     let yearlyReportJson: any | null = null;
     let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null = null;
 
     if (uploadedYearly) {
       try {
-        yearlyOcrText = await ocrPdfFromStorage({ bucket, path: uploadedYearly.path, filename: uploadedYearly.name });
+        yearlyOcrText = await ocrPdfFromStorage({
+          bucket,
+          path: uploadedYearly.path,
+          filename: uploadedYearly.name,
+        });
       } catch (e: any) {
         yearlyOcrText = null;
         yearlyOcrError = e?.message ?? "yearly OCR error";
@@ -831,9 +934,16 @@ export async function POST(req: NextRequest) {
 
       if (yearlyOcrText) {
         try {
-          yearlyGradeCheck = await judgeGradeReport({ filename: uploadedYearly.name, extractedText: yearlyOcrText });
+          yearlyGradeCheck = await judgeGradeReport({
+            filename: uploadedYearly.name,
+            extractedText: yearlyOcrText,
+          });
         } catch (e: any) {
-          yearlyGradeCheck = { isGradeReport: false, confidence: 0, reason: "判定に失敗したため判定できません" };
+          yearlyGradeCheck = {
+            isGradeReport: false,
+            confidence: 0,
+            reason: "判定に失敗したため判定できません",
+          };
           yearlyJudgeError = e?.message ?? "yearly judge error";
           console.error("[yearly judge error]", uploadedYearly?.name, e);
         }
@@ -845,7 +955,10 @@ export async function POST(req: NextRequest) {
               extractedText: yearlyOcrText,
             });
             yearlyReportJson = extracted.reportJson;
-            yearlyReportJsonMeta = { ok: extracted.ok, error: extracted.ok ? null : extracted.error ?? "JSON化に失敗" };
+            yearlyReportJsonMeta = {
+              ok: extracted.ok,
+              error: extracted.ok ? null : extracted.error ?? "JSON化に失敗",
+            };
           } else {
             yearlyReportJson = null;
             yearlyReportJsonMeta = { ok: false, error: "成績表ではないためJSON化をスキップ" };
@@ -856,17 +969,24 @@ export async function POST(req: NextRequest) {
           yearlyReportJsonMeta = { ok: false, error: e?.message ?? "JSON化エラー" };
         }
       } else {
-        yearlyGradeCheck = { isGradeReport: false, confidence: 0, reason: "OCRに失敗したため判定できません" };
+        yearlyGradeCheck = {
+          isGradeReport: false,
+          confidence: 0,
+          reason: "OCRに失敗したため判定できません",
+        };
       }
     }
 
+    // 集計用の単発データ整形
     const singleJsonItems = (singleOcrResults ?? []).map((x: any) => {
       const r = x.reportJson;
       if (r && r.docType === "juku_report") {
         const rows = flattenJukuReportToSubjectsForAnalysis(r as JukuReportJson);
         return {
           filename: x.name,
-          reportJson: { subjects: rows.map((row) => ({ name: row.name, deviation: row.deviation })) },
+          reportJson: {
+            subjects: rows.map((row) => ({ name: row.name, deviation: row.deviation })),
+          },
         };
       }
       return { filename: x.name, reportJson: x.reportJson };
@@ -880,7 +1000,8 @@ export async function POST(req: NextRequest) {
       reportJson: x.reportJson as any | null,
     }));
 
-    const hasAnyReportJson = singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
+    const hasAnyReportJson =
+      singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
 
     const commentary = hasAnyReportJson
       ? await generateCommentary({
