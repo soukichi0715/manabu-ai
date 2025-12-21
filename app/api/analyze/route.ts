@@ -47,14 +47,12 @@ async function ocrPdfFromStorage(params: {
 
   const uploaded = await openai.files.create({
     file: await OpenAI.toFile(buf, filename, { type: "application/pdf" }),
-    // ★あなたの環境ではpurpose必須
-    purpose: "assistants",
+    purpose: "assistants", // ★あなたの環境では必須
   });
 
   // 3) OCR（Responses API）
   const resp = await openai.responses.create({
-    // ★ OCRが成立しやすいモデル
-    model: "gpt-4.1",
+    model: "gpt-4.1", // ★OCRはこっちの方が安定
     input: [
       {
         role: "user",
@@ -115,6 +113,7 @@ function safeParseJson<T>(text: string): T | null {
 
 /* =========================
    ★追加：JSON Schema定義（response_format用）
+   - これで「必ずJSONだけ返す」を強制できる
 ========================= */
 const REPORT_JSON_SCHEMA = {
   name: "ReportJson",
@@ -217,7 +216,9 @@ async function extractReportJsonFromText(params: {
           role: "system",
           content:
             "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
-            "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。",
+            "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。" +
+            // ★追加（今回の帳票対策）
+            "この帳票では『偏差値』ではなく『偏差』表記のことがあります。『偏差』を偏差値として扱ってください。",
         },
         {
           role: "user",
@@ -311,14 +312,19 @@ async function judgeGradeReport(params: {
   }
 
   // -----------------------------
-  // 1) 成績表っぽい “肯定根拠” が薄い場合はfalse寄り
+  // 1) 成績表っぽい “肯定根拠”
+  //    ★修正：学習相談（成績表）に合わせて語彙を拡張
   // -----------------------------
   const POSITIVE_HINTS = [
-    /偏差値/,
+    /偏差(値)?/, // ★最重要：偏差値/偏差どちらでも拾う
     /順位/,
-    /平均点|平均との差/,
+    /平均(点)?|平均との差/,
     /得点|点数/,
-    /正答率/,
+    /評価/, // ★学習相談系は評価が根拠
+    /4科目|2科目/, // ★帳票特徴
+    /公開模試|公開模擬試験/,
+    /育成テスト|学習力育成テスト/,
+    /合格力実践テスト/,
     /判定|志望校判定/,
     /成績推移|推移|学習状況/,
     /科目|国語|算数|理科|社会/,
@@ -329,12 +335,13 @@ async function judgeGradeReport(params: {
     0
   );
 
-  if (posCount < 2) {
+  // ★修正：閾値を緩める（学習相談様式は順位等が無いケースがある）
+  if (posCount < 1) {
     return {
       isGradeReport: false,
       confidence: 70,
       reason:
-        "偏差値/順位/平均点/判定など成績表の典型語が少なく、成績表の根拠が弱い",
+        "偏差/得点/平均/評価/4科目2科目など成績表の根拠語が少なく、成績表の根拠が弱い",
     };
   }
 
@@ -353,7 +360,7 @@ async function judgeGradeReport(params: {
         {
           role: "system",
           content:
-            "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/順位など）』かどうかを判定する担当です。" +
+            "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/偏差/順位/平均点/評価など）』かどうかを判定する担当です。" +
             "推測しすぎず、本文から根拠語を示して判定してください。",
         },
         {
@@ -368,7 +375,7 @@ async function judgeGradeReport(params: {
             "\n\n" +
             "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
             "これらが本文に含まれる場合は isGradeReport=false にしてください。\n" +
-            "成績表の根拠は『偏差値』『順位』『平均点』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n",
+            "成績表の根拠は『偏差値/偏差』『順位』『平均点』『得点』『評価』『4科目/2科目』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n",
         },
       ],
     } as any // ★ SDKが古くてresponse_format型が無い場合の回避
