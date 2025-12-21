@@ -47,13 +47,11 @@ async function ocrPdfFromStorage(params: {
 
   const uploaded = await openai.files.create({
     file: await OpenAI.toFile(buf, filename, { type: "application/pdf" }),
-    // ★あなたの環境ではpurpose必須
     purpose: "assistants",
   });
 
   // 3) OCR（Responses API）
   const resp = await openai.responses.create({
-    // ★ OCRが成立しやすいモデル
     model: "gpt-4.1",
     input: [
       {
@@ -78,30 +76,57 @@ async function ocrPdfFromStorage(params: {
     // 削除失敗しても致命的ではないので無視
   }
 
-  // ※Responses API は output_text を使うのが型的に安全
   return typeof resp.output_text === "string" ? resp.output_text : "";
 }
 
 /* =========================
    JSON schema（抽出）
 ========================= */
-type ReportJson = {
-  docType: "report";
+
+/**
+ * 受験塾（育成テスト / 公開模試）用の成績JSON
+ * - 学校の期末テスト等は扱わない
+ * - 「偏差値」または「偏差」のどちらでも deviation に入れる
+ * - 2科/4科（合計や偏差、順位、平均との差）も totals に入れる
+ */
+type JukuReportJson = {
+  docType: "juku_report";
   student: { name: string | null; id: string | null };
-  test: { name: string | null; date: string | null };
-  overall: {
-    score: number | null;
-    deviation: number | null;
-    rank: number | null;
-    avg: number | null;
+  meta: {
+    sourceFilename: string | null;
+    // 学習相談など帳票タイトルが取れれば入れる
+    title: string | null;
   };
-  subjects: {
-    name: string;
-    score: number | null;
-    deviation: number | null;
-    avg: number | null;
-    rank: number | null;
-  }[];
+  tests: Array<{
+    testType: "ikusei" | "kokai_moshi" | "other";
+    testName: string | null; // 例：第◯回育成テスト / 公開模試 / etc.
+    date: string | null;
+    subjects: Array<{
+      name: "国語" | "算数" | "理科" | "社会" | "不明";
+      score: number | null;
+      deviation: number | null; // 偏差値 or 偏差
+      rank: number | null;
+      avg: number | null; // 平均点
+      diffFromAvg: number | null; // 平均差（あれば）
+    }>;
+    totals: {
+      two: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+      };
+      four: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+      };
+    };
+    notes: string[];
+  }>;
   notes: string[];
 };
 
@@ -114,15 +139,15 @@ function safeParseJson<T>(text: string): T | null {
 }
 
 /* =========================
-   ★追加：JSON Schema定義（text.format 用）
+   ★ JSON Schema（text.format 用）
 ========================= */
-const REPORT_JSON_SCHEMA = {
-  name: "ReportJson",
+const JUKU_REPORT_JSON_SCHEMA = {
+  name: "JukuReportJson",
   schema: {
     type: "object",
     additionalProperties: false,
     properties: {
-      docType: { type: "string", enum: ["report"] },
+      docType: { type: "string", enum: ["juku_report"] },
       student: {
         type: "object",
         additionalProperties: false,
@@ -132,47 +157,95 @@ const REPORT_JSON_SCHEMA = {
         },
         required: ["name", "id"],
       },
-      test: {
+      meta: {
         type: "object",
         additionalProperties: false,
         properties: {
-          name: { type: ["string", "null"] },
-          date: { type: ["string", "null"] },
+          sourceFilename: { type: ["string", "null"] },
+          title: { type: ["string", "null"] },
         },
-        required: ["name", "date"],
+        required: ["sourceFilename", "title"],
       },
-      overall: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          score: { type: ["number", "null"] },
-          deviation: { type: ["number", "null"] },
-          rank: { type: ["number", "null"] },
-          avg: { type: ["number", "null"] },
-        },
-        required: ["score", "deviation", "rank", "avg"],
-      },
-      subjects: {
+      tests: {
         type: "array",
         items: {
           type: "object",
           additionalProperties: false,
           properties: {
-            name: { type: "string" },
-            score: { type: ["number", "null"] },
-            deviation: { type: ["number", "null"] },
-            avg: { type: ["number", "null"] },
-            rank: { type: ["number", "null"] },
+            testType: {
+              type: "string",
+              enum: ["ikusei", "kokai_moshi", "other"],
+            },
+            testName: { type: ["string", "null"] },
+            date: { type: ["string", "null"] },
+
+            subjects: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  name: {
+                    type: "string",
+                    enum: ["国語", "算数", "理科", "社会", "不明"],
+                  },
+                  score: { type: ["number", "null"] },
+                  deviation: { type: ["number", "null"] },
+                  rank: { type: ["number", "null"] },
+                  avg: { type: ["number", "null"] },
+                  diffFromAvg: { type: ["number", "null"] },
+                },
+                required: [
+                  "name",
+                  "score",
+                  "deviation",
+                  "rank",
+                  "avg",
+                  "diffFromAvg",
+                ],
+              },
+            },
+
+            totals: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                two: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    score: { type: ["number", "null"] },
+                    deviation: { type: ["number", "null"] },
+                    rank: { type: ["number", "null"] },
+                    avg: { type: ["number", "null"] },
+                    diffFromAvg: { type: ["number", "null"] },
+                  },
+                  required: ["score", "deviation", "rank", "avg", "diffFromAvg"],
+                },
+                four: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    score: { type: ["number", "null"] },
+                    deviation: { type: ["number", "null"] },
+                    rank: { type: ["number", "null"] },
+                    avg: { type: ["number", "null"] },
+                    diffFromAvg: { type: ["number", "null"] },
+                  },
+                  required: ["score", "deviation", "rank", "avg", "diffFromAvg"],
+                },
+              },
+              required: ["two", "four"],
+            },
+
+            notes: { type: "array", items: { type: "string" } },
           },
-          required: ["name", "score", "deviation", "avg", "rank"],
+          required: ["testType", "testName", "date", "subjects", "totals", "notes"],
         },
       },
-      notes: {
-        type: "array",
-        items: { type: "string" },
-      },
+      notes: { type: "array", items: { type: "string" } },
     },
-    required: ["docType", "student", "test", "overall", "subjects", "notes"],
+    required: ["docType", "student", "meta", "tests", "notes"],
   },
   strict: true,
 } as const;
@@ -192,40 +265,36 @@ const JUDGE_JSON_SCHEMA = {
   strict: true,
 } as const;
 
-/** OCRテキストから成績表JSONを抽出（MVP） */
-async function extractReportJsonFromText(params: {
+/** OCRテキストから受験塾用成績JSONを抽出（育成テスト/公開模試） */
+async function extractJukuReportJsonFromText(params: {
   filename: string;
   extractedText: string;
 }) {
   const { filename, extractedText } = params;
 
-  // 長すぎると遅くなるので適度に圧縮（先頭＋末尾）
-  const head = extractedText.slice(0, 4000);
-  const tail = extractedText.slice(-4000);
+  const head = extractedText.slice(0, 5000);
+  const tail = extractedText.slice(-5000);
   const snippet = `${head}\n...\n${tail}`;
 
-  // ★ 修正：response_format → text.format（json_schema）
   const resp = await openai.responses.create({
-    // json_schema を安定させるため 4o-mini に寄せる（コストも軽め）
     model: "gpt-4o-mini",
     input: [
       {
         role: "system",
         content:
-          "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
-          "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。" +
-          "この帳票では『偏差値』ではなく『偏差』表記のことがあります。『偏差』を偏差値として扱ってください。",
+          "あなたは中学受験塾の成績表データ化担当です。OCRテキストから『育成テスト』『公開模試』の成績を構造化JSONにします。" +
+          "推測は禁止。見えない/不明はnull。空欄はnull。" +
+          "【最重要】このアプリの対象は中学受験塾なので、学校の期末テスト/5科/9科/英語/音楽/体育などは原則として無視してください。" +
+          "抽出対象は基本『国語・算数・理科・社会』と、2科/4科の合計・偏差(偏差値)・順位・平均点・平均との差です。" +
+          "『偏差値』だけでなく『偏差』表記も deviation として扱ってください。" +
+          "『育成テスト』『公開模試』という語があれば testType をそれぞれ ikusei / kokai_moshi にしてください。",
       },
       {
         role: "user",
         content:
           `ファイル名: ${filename}\n\n` +
-          "次のOCRテキストから成績表の情報を抽出してください。\n" +
-          "ルール:\n" +
-          "- 取れない項目は null\n" +
-          "- 数字は可能なら number（例: 54.3）\n" +
-          "- 科目は配列 subjects にまとめる（科目名、得点、偏差値、平均、順位）\n" +
-          "- notes は補足を短く（例：『算数の偏差値が欠落』など）\n\n" +
+          "次のOCRテキストから、受験塾（育成テスト/公開模試）の成績情報だけを抽出してください。\n" +
+          "注意：学校の期末テスト等の数字が混在しても、それは抽出しない。\n\n" +
           "OCRテキスト:\n" +
           snippet,
       },
@@ -233,57 +302,81 @@ async function extractReportJsonFromText(params: {
     text: {
       format: {
         type: "json_schema",
-        name: REPORT_JSON_SCHEMA.name,
+        name: JUKU_REPORT_JSON_SCHEMA.name,
         strict: true,
-        schema: REPORT_JSON_SCHEMA.schema,
+        schema: JUKU_REPORT_JSON_SCHEMA.schema,
       },
     },
   });
 
   const out = (resp.output_text ?? "").trim();
+  const parsed = safeParseJson<JukuReportJson>(out);
 
-  const parsed = safeParseJson<ReportJson>(out);
-  if (!parsed || parsed.docType !== "report") {
+  if (!parsed || parsed.docType !== "juku_report") {
     return {
       ok: false as const,
-      reportJson: null as ReportJson | null,
+      reportJson: null as JukuReportJson | null,
       error: "JSONの解析に失敗（フォーマット不正）",
       raw: out,
     };
   }
 
-  // 最低限の整形（subjects.nameが空なら弾くなど）
-  if (!Array.isArray(parsed.subjects)) parsed.subjects = [];
-  parsed.subjects = parsed.subjects
-    .filter((s) => s && typeof s.name === "string" && s.name.trim().length > 0)
-    .map((s) => ({
-      name: s.name.trim(),
-      score: typeof s.score === "number" ? s.score : null,
-      deviation: typeof s.deviation === "number" ? s.deviation : null,
-      avg: typeof s.avg === "number" ? s.avg : null,
-      rank: typeof s.rank === "number" ? s.rank : null,
-    }));
+  // 多少の正規化
+  parsed.meta = parsed.meta ?? { sourceFilename: filename, title: null };
+  if (parsed.meta.sourceFilename == null) parsed.meta.sourceFilename = filename;
+
+  if (!Array.isArray(parsed.tests)) parsed.tests = [];
+  parsed.tests = parsed.tests.map((t) => {
+    if (!Array.isArray(t.subjects)) t.subjects = [];
+    t.subjects = t.subjects
+      .filter((s) => s && typeof s.name === "string" && s.name.trim().length > 0)
+      .map((s) => ({
+        name: (["国語", "算数", "理科", "社会"].includes(s.name)
+          ? s.name
+          : "不明") as any,
+        score: typeof s.score === "number" ? s.score : null,
+        deviation: typeof s.deviation === "number" ? s.deviation : null,
+        rank: typeof s.rank === "number" ? s.rank : null,
+        avg: typeof s.avg === "number" ? s.avg : null,
+        diffFromAvg: typeof s.diffFromAvg === "number" ? s.diffFromAvg : null,
+      }));
+
+    // totalsの欠損を防ぐ
+    t.totals = t.totals ?? {
+      two: { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null },
+      four: { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null },
+    };
+    t.totals.two = t.totals.two ?? {
+      score: null, deviation: null, rank: null, avg: null, diffFromAvg: null,
+    };
+    t.totals.four = t.totals.four ?? {
+      score: null, deviation: null, rank: null, avg: null, diffFromAvg: null,
+    };
+
+    if (!Array.isArray(t.notes)) t.notes = [];
+    return t;
+  });
+
+  if (!Array.isArray(parsed.notes)) parsed.notes = [];
 
   return {
     ok: true as const,
     reportJson: parsed,
-    raw: out, // デバッグ用（必要なければ後で消す）
+    raw: out,
   };
 }
 
 /* =========================
    成績表判定
 ========================= */
-/** OCRテキストから「成績表っぽいか？」判定（ハード判定→LLM） */
 async function judgeGradeReport(params: {
   filename: string;
   extractedText: string;
 }) {
   const { filename, extractedText } = params;
 
-  // 先頭+末尾（抜け道対策）
-  const head = extractedText.slice(0, 3000);
-  const tail = extractedText.slice(-3000);
+  const head = extractedText.slice(0, 3500);
+  const tail = extractedText.slice(-3500);
   const snippet = `${head}\n...\n${tail}`;
 
   if (!snippet.trim()) {
@@ -294,9 +387,6 @@ async function judgeGradeReport(params: {
     };
   }
 
-  // -----------------------------
-  // 0) ハード判定（強制false）
-  // -----------------------------
   const NG_PATTERNS = [
     /入学試験|入試|選抜|試験問題|問題用紙|問題冊子/,
     /解答用紙|解答欄|解答用|解答用紙/,
@@ -314,21 +404,15 @@ async function judgeGradeReport(params: {
     };
   }
 
-  // -----------------------------
-  // 1) 成績表っぽい “肯定根拠”（学習相談帳票対応）
-  // -----------------------------
+  // ★受験塾の肯定根拠を強くする（育成テスト/公開模試）
   const POSITIVE_HINTS = [
-    /偏差(値)?/, // 偏差値/偏差を拾う
+    /育成テスト|学習力育成テスト/,
+    /公開模試|公開模擬試験/,
+    /偏差(値)?/, // 偏差値/偏差
     /順位/,
     /平均(点)?|平均との差/,
     /得点|点数/,
-    /評価/,
-    /4科目|2科目/,
-    /公開模試|公開模擬試験/,
-    /育成テスト|学習力育成テスト/,
-    /合格力実践テスト/,
-    /判定|志望校判定/,
-    /成績推移|推移|学習状況/,
+    /2科目|2科|4科目|4科/,
     /科目|国語|算数|理科|社会/,
   ];
 
@@ -337,28 +421,25 @@ async function judgeGradeReport(params: {
     0
   );
 
-  // 学習相談様式は順位等が無いケースもあるので閾値は1
+  // 受験塾帳票は「育成テスト/公開模試」が出ればほぼ成績表
   if (posCount < 1) {
     return {
       isGradeReport: false,
       confidence: 70,
       reason:
-        "偏差/得点/平均/評価/4科目2科目など成績表の根拠語が少なく、成績表の根拠が弱い",
+        "育成テスト/公開模試/偏差/順位/平均など成績表の根拠語が少なく、成績表の根拠が弱い",
     };
   }
 
-  // -----------------------------
-  // 2) LLMで最終判定（補助）
-  // -----------------------------
-  // ★ 修正：response_format → text.format（json_schema）
+  // LLM判定（補助）
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
       {
         role: "system",
         content:
-          "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/偏差/順位/平均点/評価など）』かどうかを判定する担当です。" +
-          "推測しすぎず、本文から根拠語を示して判定してください。",
+          "あなたは学習塾の業務システムで、PDFの内容が『受験塾の成績表（育成テスト/公開模試/偏差/順位/平均/2科4科など）』かどうかを判定する担当です。" +
+          "根拠語を示して判定してください。",
       },
       {
         role: "user",
@@ -372,7 +453,7 @@ async function judgeGradeReport(params: {
           "\n\n" +
           "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
           "これらが本文に含まれる場合は isGradeReport=false にしてください。\n" +
-          "成績表の根拠は『偏差値/偏差』『順位』『平均点』『得点』『評価』『4科目/2科目』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n",
+          "受験塾の成績表の根拠は『育成テスト』『公開模試』『偏差/偏差値』『順位』『平均点/平均との差』『2科/4科』『国語/算数/理科/社会』などです。\n",
       },
     ],
     text: {
@@ -439,6 +520,28 @@ function mergeAgg(a: SubjectAgg, dev: number | null): SubjectAgg {
   };
 }
 
+// ★既存UI/集計の都合上、JukuReportJson → 旧来の subjects 配列の形へ寄せて集計するためのヘルパ
+function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
+  if (!juku) return [];
+
+  // 全testsのsubjectsを合算（同名科目は複数回として扱う）
+  const rows: Array<{ name: string; deviation: number | null }> = [];
+
+  for (const t of juku.tests ?? []) {
+    for (const s of t.subjects ?? []) {
+      const nm = String(s?.name ?? "").trim();
+      if (!nm) continue;
+      rows.push({ name: nm, deviation: safeNum(s?.deviation) });
+    }
+
+    // 2科/4科も「2科」「4科」として集計に混ぜたい場合はここで追加
+    // rows.push({ name: "2科", deviation: safeNum(t?.totals?.two?.deviation) });
+    // rows.push({ name: "4科", deviation: safeNum(t?.totals?.four?.deviation) });
+  }
+
+  return rows;
+}
+
 function analyzeSinglesReportJson(
   singles: Array<{ reportJson?: any; filename?: string }>
 ) {
@@ -469,7 +572,6 @@ function analyzeSinglesReportJson(
 
   const subjects = Array.from(map.values());
 
-  // 平均偏差値が低い順（nullは最後）
   subjects.sort((a, b) => {
     const av = a.avgDeviation ?? 9999;
     const bv = b.avgDeviation ?? 9999;
@@ -482,6 +584,38 @@ function analyzeSinglesReportJson(
 }
 
 function analyzeYearlyReportJson(yearly: any) {
+  // ★ yearly が JukuReportJson の場合は flatten して集計
+  if (yearly && yearly.docType === "juku_report") {
+    const rows = flattenJukuReportToSubjectsForAnalysis(yearly as JukuReportJson);
+
+    // rows から SubjectAgg を作る
+    const map = new Map<string, SubjectAgg>();
+    for (const row of rows) {
+      const name = String(row.name ?? "").trim();
+      if (!name) continue;
+
+      const dev = safeNum(row.deviation);
+      const cur =
+        map.get(name) ??
+        ({
+          name,
+          count: 0,
+          avgDeviation: null,
+          lastDeviation: null,
+          minDeviation: null,
+        } as SubjectAgg);
+
+      map.set(name, mergeAgg(cur, dev));
+    }
+
+    const subjects = Array.from(map.values());
+    subjects.sort((a, b) => (a.avgDeviation ?? 9999) - (b.avgDeviation ?? 9999));
+    const weakest = subjects[0]?.avgDeviation != null ? subjects[0] : null;
+
+    return { subjects, weakest };
+  }
+
+  // 旧形式（互換）
   if (!yearly || !Array.isArray(yearly.subjects)) {
     return { subjects: [], weakest: null };
   }
@@ -546,8 +680,8 @@ async function generateCommentary(params: {
   focus: FocusAxis[];
   singleAnalysis: any;
   yearlyAnalysis: any;
-  singlesReportJson: Array<{ name: string; reportJson: ReportJson | null }>;
-  yearlyReportJson: ReportJson | null;
+  singlesReportJson: Array<{ name: string; reportJson: any | null }>;
+  yearlyReportJson: any | null;
 }) {
   const {
     tone,
@@ -559,7 +693,6 @@ async function generateCommentary(params: {
     yearlyReportJson,
   } = params;
 
-  // 送る情報は「JSON中心」に絞る（OCR全文は渡さない＝速く安定）
   const payload = {
     settings: {
       tone,
@@ -572,20 +705,11 @@ async function generateCommentary(params: {
       singles: singleAnalysis,
       yearly: yearlyAnalysis,
     },
-    // 重くならないように、単発JSONは科目だけ抽出
     singles: singlesReportJson.map((x) => ({
       name: x.name,
-      subjects: x.reportJson?.subjects ?? null,
-      overall: x.reportJson?.overall ?? null,
-      test: x.reportJson?.test ?? null,
+      reportJson: x.reportJson,
     })),
-    yearly: yearlyReportJson
-      ? {
-          subjects: yearlyReportJson.subjects,
-          overall: yearlyReportJson.overall,
-          test: yearlyReportJson.test,
-        }
-      : null,
+    yearly: yearlyReportJson,
   };
 
   const system = `
@@ -604,7 +728,7 @@ async function generateCommentary(params: {
 ・余計な前置きなし
 ・以下の構成で出す（対象に応じて言い回し調整）
   1) まず一言（共感/現状）
-  2) 事実（数値の要約：弱点科目や平均偏差値など）
+  2) 事実（数値の要約：弱点科目や2科/4科の状況など）
   3) 原因仮説（focusに沿って2〜4個）
   4) 次の一手（今日/今週でできる行動。具体）
   5) 最後に一言（対話を続ける問いかけ）
@@ -612,7 +736,7 @@ async function generateCommentary(params: {
   `.trim();
 
   const user = `
-以下は成績表JSONと集計結果です。
+以下は受験塾の成績表JSON（育成テスト/公開模試）と集計結果です。
 このデータを元に「まなぶ先生AI」として講評を書いてください。
 
 【データ(JSON)】
@@ -708,11 +832,12 @@ export async function POST(req: NextRequest) {
           extractedText: text,
         });
 
-        let reportJson: ReportJson | null = null;
+        let reportJson: any | null = null;
         let reportJsonMeta: { ok: boolean; error: string | null } | null = null;
 
         if (gradeCheck.isGradeReport) {
-          const extracted = await extractReportJsonFromText({
+          // ★修正：受験塾用（育成テスト/公開模試）JSON抽出に切替
+          const extracted = await extractJukuReportJsonFromText({
             filename: f.name,
             extractedText: text,
           });
@@ -760,7 +885,9 @@ export async function POST(req: NextRequest) {
     let yearlyGradeCheck:
       | { isGradeReport: boolean; confidence: number; reason: string }
       | null = null;
-    let yearlyReportJson: ReportJson | null = null;
+
+    // ★ yearly も any で保持（JukuReportJsonになる）
+    let yearlyReportJson: any | null = null;
     let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null =
       null;
 
@@ -795,7 +922,8 @@ export async function POST(req: NextRequest) {
 
         try {
           if (yearlyGradeCheck?.isGradeReport) {
-            const extracted = await extractReportJsonFromText({
+            // ★修正：受験塾用（育成テスト/公開模試）JSON抽出に切替
+            const extracted = await extractJukuReportJsonFromText({
               filename: uploadedYearly.name,
               extractedText: yearlyOcrText,
             });
@@ -830,10 +958,28 @@ export async function POST(req: NextRequest) {
     }
 
     /* ---------- ②: JSONを使った分析集計（returnの直前で計算） ---------- */
-    const singleJsonItems = (singleOcrResults ?? []).map((x: any) => ({
-      filename: x.name, // ★ x.filename ではなく x.name
-      reportJson: x.reportJson,
-    }));
+
+    // ★既存の analyzeSinglesReportJson は reportJson.subjects を前提にしているため、
+    //   受験塾JSONの場合は flatten した互換形式を作って突っ込む
+    const singleJsonItems = (singleOcrResults ?? []).map((x: any) => {
+      const r = x.reportJson;
+      if (r && r.docType === "juku_report") {
+        const rows = flattenJukuReportToSubjectsForAnalysis(r as JukuReportJson);
+        return {
+          filename: x.name,
+          reportJson: {
+            subjects: rows.map((row) => ({
+              name: row.name,
+              deviation: row.deviation,
+            })),
+          },
+        };
+      }
+      return {
+        filename: x.name,
+        reportJson: x.reportJson,
+      };
+    });
 
     const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
     const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
@@ -841,10 +987,9 @@ export async function POST(req: NextRequest) {
     /* ---------- ★追加：講評生成（commentary） ---------- */
     const singlesReportJson = (singleOcrResults ?? []).map((x: any) => ({
       name: x.name,
-      reportJson: x.reportJson as ReportJson | null,
+      reportJson: x.reportJson as any | null,
     }));
 
-    // ※講評は「成績表のJSONが1つも無い」場合、薄くなるのでガード
     const hasAnyReportJson =
       singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
 
