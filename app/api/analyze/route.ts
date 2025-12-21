@@ -349,6 +349,13 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     endPatterns
   );
 
+  // ★FIX1：年間推移系のブロックも拾う（「育成/公開」が見出し崩れで取れない場合の保険）
+  const yearlySection = extractSection(
+    extractedText,
+    [/年間/i, /推移/i, /年度/i, /前期/i, /後期/i, /年間成績/i, /年間まとめ/i, /まとめ/i, /総括/i],
+    endPatterns
+  );
+
   const kwPrimary = buildKeywordWindows(
     extractedText,
     [/育成/i, /公開/i, /模試/i, /偏差/i, /順位/i, /2科/i, /4科/i, /国語/i, /算数/i, /理科/i, /社会/i],
@@ -363,6 +370,8 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     [
       ikuseiSection ? `【BLOCK:IKUSEI（育成テスト）】\n${ikuseiSection}` : null,
       kokaiSection ? `【BLOCK:KOKAI（公開模試）】\n${kokaiSection}` : null,
+      // ★FIX1：年間推移ブロックを追加
+      yearlySection ? `【BLOCK:YEARLY（年間推移）】\n${yearlySection}` : null,
       kwPrimary.snippet ? `【BLOCK:KEYWORDS（補助）】\n${kwPrimary.snippet}` : null,
     ]
       .filter(Boolean)
@@ -373,6 +382,8 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     hits: kwPrimary.hits,
     hasIkuseiSection: !!ikuseiSection,
     hasKokaiSection: !!kokaiSection,
+    // ★FIX1：デバッグにも載せる
+    hasYearlySection: !!yearlySection,
     snippetPreview: snippet.slice(0, 2000),
   };
 
@@ -387,8 +398,10 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
           "OCRテキストから『育成テスト』『公開模試』の成績だけをJSON化します。" +
           "【最重要】BLOCK:IKUSEI がある場合、tests に testType='ikusei' の要素を1つ作る。" +
           "BLOCK:KOKAI がある場合、tests に testType='kokai_moshi' の要素を1つ作る。" +
-          "それ以外のテストは作らない（otherは原則作らない）。" +
-          "testName はそれぞれ '育成テスト' / '公開模試' を入れてよい。" +
+          // ★FIX2：年間推移のブロックがあるときは「年間推移」要素を1つ作る（testType は other でOK）
+          "BLOCK:YEARLY がある場合、tests に testType='other' の要素を1つ作る。" +
+          "testName はそれぞれ '育成テスト' / '公開模試' / '年間推移' を入れてよい。" +
+          "それ以外のテストは作らない（otherは原則作らない。※ただし年間推移は例外）。" +
           "【超重要】学校の定期テスト（期末/中間/定期/評価/内申/5科/9科/英語/美術/体育/技家）は絶対に抽出しない。" +
           "推測は禁止。見えない/不明はnull。空欄はnull。" +
           "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。",
@@ -459,7 +472,8 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
   }
 
   // other は基本捨てる（IKUSEI/KOKAIに寄らなかったもの）
-  parsed.tests = parsed.tests.filter((t) => t.testType !== "other");
+  // ★FIX3：ただし「年間推移」だけは残す（年間推移表で tests:[] にならないため）
+  parsed.tests = parsed.tests.filter((t) => t.testType !== "other" || t.testName === "年間推移");
 
   // 重複削除
   parsed.tests = dedupeTests(parsed.tests);
@@ -528,22 +542,12 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return { isGradeReport: false, confidence: 10, reason: "OCR結果がほぼ空でした（判定材料不足）" };
   }
 
-  // ★FIX：年間推移タイプ（「育成/公開」が薄い）でも成績表判定できるようにシグナルを追加
-  const hasJukuKeywords =
-    /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試|年間|推移|成績推移|年間成績|年間まとめ|まとめ|総括|年度|前期|後期)/.test(
-      snippet
-    );
-
-  // ★FIX：年間表で出やすい語も追加（平均・年度平均など）
-  const hasScoreSignals =
-    /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会|年度平均|年間平均|平均偏差|平均順位)/.test(
-      snippet
-    );
-
+  const hasJukuKeywords = /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試)/.test(snippet);
+  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会)/.test(snippet);
   const strongExamDocSignals = /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
 
   if (hasJukuKeywords && hasScoreSignals) {
-    return { isGradeReport: true, confidence: 98, reason: "成績推移/年間を含む成績指標語が確認できたため" };
+    return { isGradeReport: true, confidence: 98, reason: "育成/公開と成績指標語が確認できたため" };
   }
 
   if (strongExamDocSignals && !hasScoreSignals) {
@@ -556,8 +560,7 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
       {
         role: "system",
         content:
-          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。" +
-          "加えて、年間の成績推移表（年間/推移/年度/前期/後期/年間平均 など）も成績表として判定してください。",
+          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。",
       },
       { role: "user", content: `ファイル名: ${filename}\n\nOCRテキスト（抜粋）:\n${snippet}` },
     ],
