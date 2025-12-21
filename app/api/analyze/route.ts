@@ -47,11 +47,13 @@ async function ocrPdfFromStorage(params: {
 
   const uploaded = await openai.files.create({
     file: await OpenAI.toFile(buf, filename, { type: "application/pdf" }),
+    // ★あなたの環境ではpurpose必須
     purpose: "assistants",
   });
 
   // 3) OCR（Responses API）
   const resp = await openai.responses.create({
+    // ★ OCRが成立しやすいモデル
     model: "gpt-4.1",
     input: [
       {
@@ -76,6 +78,7 @@ async function ocrPdfFromStorage(params: {
     // 削除失敗しても致命的ではないので無視
   }
 
+  // ※Responses API は output_text を使うのが型的に安全
   return typeof resp.output_text === "string" ? resp.output_text : "";
 }
 
@@ -111,7 +114,7 @@ function safeParseJson<T>(text: string): T | null {
 }
 
 /* =========================
-   ★追加：JSON Schema定義（response_format用）
+   ★追加：JSON Schema定義（text.format 用）
 ========================= */
 const REPORT_JSON_SCHEMA = {
   name: "ReportJson",
@@ -196,41 +199,46 @@ async function extractReportJsonFromText(params: {
 }) {
   const { filename, extractedText } = params;
 
+  // 長すぎると遅くなるので適度に圧縮（先頭＋末尾）
   const head = extractedText.slice(0, 4000);
   const tail = extractedText.slice(-4000);
   const snippet = `${head}\n...\n${tail}`;
 
-  const resp = await openai.responses.create(
-    {
-      model: "gpt-4.1-mini",
-      response_format: {
-        type: "json_schema",
-        json_schema: REPORT_JSON_SCHEMA,
+  // ★ 修正：response_format → text.format（json_schema）
+  const resp = await openai.responses.create({
+    // json_schema を安定させるため 4o-mini に寄せる（コストも軽め）
+    model: "gpt-4o-mini",
+    input: [
+      {
+        role: "system",
+        content:
+          "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
+          "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。" +
+          "この帳票では『偏差値』ではなく『偏差』表記のことがあります。『偏差』を偏差値として扱ってください。",
       },
-      input: [
-        {
-          role: "system",
-          content:
-            "あなたは学習塾の成績表データ化担当です。OCRテキストから成績表の数値を構造化JSONにします。" +
-            "推測は禁止。見えない/不明はnullにしてください。日本語を尊重し、科目名は「国語/算数/理科/社会」を優先してください。" +
-            "この帳票では『偏差値』ではなく『偏差』表記のことがあります。『偏差』を偏差値として扱ってください。",
-        },
-        {
-          role: "user",
-          content:
-            `ファイル名: ${filename}\n\n` +
-            "次のOCRテキストから成績表の情報を抽出してください。\n" +
-            "ルール:\n" +
-            "- 取れない項目は null\n" +
-            "- 数字は可能なら number（例: 54.3）\n" +
-            "- 科目は配列 subjects にまとめる（科目名、得点、偏差値、平均、順位）\n" +
-            "- notes は補足を短く\n\n" +
-            "OCRテキスト:\n" +
-            snippet,
-        },
-      ],
-    } as any
-  );
+      {
+        role: "user",
+        content:
+          `ファイル名: ${filename}\n\n` +
+          "次のOCRテキストから成績表の情報を抽出してください。\n" +
+          "ルール:\n" +
+          "- 取れない項目は null\n" +
+          "- 数字は可能なら number（例: 54.3）\n" +
+          "- 科目は配列 subjects にまとめる（科目名、得点、偏差値、平均、順位）\n" +
+          "- notes は補足を短く（例：『算数の偏差値が欠落』など）\n\n" +
+          "OCRテキスト:\n" +
+          snippet,
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: REPORT_JSON_SCHEMA.name,
+        strict: true,
+        schema: REPORT_JSON_SCHEMA.schema,
+      },
+    },
+  });
 
   const out = (resp.output_text ?? "").trim();
 
@@ -244,6 +252,7 @@ async function extractReportJsonFromText(params: {
     };
   }
 
+  // 最低限の整形（subjects.nameが空なら弾くなど）
   if (!Array.isArray(parsed.subjects)) parsed.subjects = [];
   parsed.subjects = parsed.subjects
     .filter((s) => s && typeof s.name === "string" && s.name.trim().length > 0)
@@ -258,19 +267,21 @@ async function extractReportJsonFromText(params: {
   return {
     ok: true as const,
     reportJson: parsed,
-    raw: out,
+    raw: out, // デバッグ用（必要なければ後で消す）
   };
 }
 
 /* =========================
    成績表判定
 ========================= */
+/** OCRテキストから「成績表っぽいか？」判定（ハード判定→LLM） */
 async function judgeGradeReport(params: {
   filename: string;
   extractedText: string;
 }) {
   const { filename, extractedText } = params;
 
+  // 先頭+末尾（抜け道対策）
   const head = extractedText.slice(0, 3000);
   const tail = extractedText.slice(-3000);
   const snippet = `${head}\n...\n${tail}`;
@@ -283,6 +294,9 @@ async function judgeGradeReport(params: {
     };
   }
 
+  // -----------------------------
+  // 0) ハード判定（強制false）
+  // -----------------------------
   const NG_PATTERNS = [
     /入学試験|入試|選抜|試験問題|問題用紙|問題冊子/,
     /解答用紙|解答欄|解答用|解答用紙/,
@@ -300,8 +314,11 @@ async function judgeGradeReport(params: {
     };
   }
 
+  // -----------------------------
+  // 1) 成績表っぽい “肯定根拠”（学習相談帳票対応）
+  // -----------------------------
   const POSITIVE_HINTS = [
-    /偏差(値)?/,
+    /偏差(値)?/, // 偏差値/偏差を拾う
     /順位/,
     /平均(点)?|平均との差/,
     /得点|点数/,
@@ -320,6 +337,7 @@ async function judgeGradeReport(params: {
     0
   );
 
+  // 学習相談様式は順位等が無いケースもあるので閾値は1
   if (posCount < 1) {
     return {
       isGradeReport: false,
@@ -329,35 +347,43 @@ async function judgeGradeReport(params: {
     };
   }
 
-  const resp = await openai.responses.create(
-    {
-      model: "gpt-4.1-mini",
-      response_format: {
-        type: "json_schema",
-        json_schema: JUDGE_JSON_SCHEMA,
+  // -----------------------------
+  // 2) LLMで最終判定（補助）
+  // -----------------------------
+  // ★ 修正：response_format → text.format（json_schema）
+  const resp = await openai.responses.create({
+    model: "gpt-4o-mini",
+    input: [
+      {
+        role: "system",
+        content:
+          "あなたは学習塾の業務システムで、PDFの内容が『成績表（テスト結果/成績推移/偏差値/偏差/順位/平均点/評価など）』かどうかを判定する担当です。" +
+          "推測しすぎず、本文から根拠語を示して判定してください。",
       },
-      input: [
-        {
-          role: "system",
-          content:
-            "あなたは学習塾の業務システムで、PDFの内容が『成績表（偏差/得点/平均/評価など）』かどうかを判定する担当です。",
-        },
-        {
-          role: "user",
-          content:
-            "次のOCRテキストは、アップロードされたPDFの内容です。\n" +
-            "ファイル名: " +
-            filename +
-            "\n\n" +
-            "OCRテキスト（抜粋）:\n" +
-            snippet +
-            "\n\n" +
-            "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
-            "これらが本文に含まれる場合は isGradeReport=false にしてください。\n",
-        },
-      ],
-    } as any
-  );
+      {
+        role: "user",
+        content:
+          "次のOCRテキストは、アップロードされたPDFの内容です。\n" +
+          "ファイル名: " +
+          filename +
+          "\n\n" +
+          "OCRテキスト（抜粋）:\n" +
+          snippet +
+          "\n\n" +
+          "【重要】次のような文書は『成績表』ではありません：入学試験/入試/試験問題/問題用紙/解答用紙/解答欄/配点/大問小問/注意事項/『記入しないこと』\n" +
+          "これらが本文に含まれる場合は isGradeReport=false にしてください。\n" +
+          "成績表の根拠は『偏差値/偏差』『順位』『平均点』『得点』『評価』『4科目/2科目』『正答率』『判定』『成績推移』などの語や、科目別スコア一覧があること。\n",
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: JUDGE_JSON_SCHEMA.name,
+        strict: true,
+        schema: JUDGE_JSON_SCHEMA.schema,
+      },
+    },
+  });
 
   const txt = (resp.output_text ?? "").trim();
 
@@ -442,7 +468,14 @@ function analyzeSinglesReportJson(
   }
 
   const subjects = Array.from(map.values());
-  subjects.sort((a, b) => (a.avgDeviation ?? 9999) - (b.avgDeviation ?? 9999));
+
+  // 平均偏差値が低い順（nullは最後）
+  subjects.sort((a, b) => {
+    const av = a.avgDeviation ?? 9999;
+    const bv = b.avgDeviation ?? 9999;
+    return av - bv;
+  });
+
   const weakest = subjects[0]?.avgDeviation != null ? subjects[0] : null;
 
   return { subjects, weakest };
@@ -526,6 +559,7 @@ async function generateCommentary(params: {
     yearlyReportJson,
   } = params;
 
+  // 送る情報は「JSON中心」に絞る（OCR全文は渡さない＝速く安定）
   const payload = {
     settings: {
       tone,
@@ -538,6 +572,7 @@ async function generateCommentary(params: {
       singles: singleAnalysis,
       yearly: yearlyAnalysis,
     },
+    // 重くならないように、単発JSONは科目だけ抽出
     singles: singlesReportJson.map((x) => ({
       name: x.name,
       subjects: x.reportJson?.subjects ?? null,
@@ -555,11 +590,31 @@ async function generateCommentary(params: {
 
   const system = `
 あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
-（中略：あなたの元のsystemのまま）
+
+◆最重要の価値観
+・「正しく解く力」よりも、「自分で考える力」を育てることを最優先にする。
+・ミスは責めず、「次に伸びるヒント」として扱う。
+
+◆話し方・トーン
+・基本はやさしくフランク（優しさ7：厳しさ3）。ただし指摘すべき点は明確に。
+・ユーザー設定 tone/target を必ず反映。
+
+◆出力ルール
+・日本語
+・余計な前置きなし
+・以下の構成で出す（対象に応じて言い回し調整）
+  1) まず一言（共感/現状）
+  2) 事実（数値の要約：弱点科目や平均偏差値など）
+  3) 原因仮説（focusに沿って2〜4個）
+  4) 次の一手（今日/今週でできる行動。具体）
+  5) 最後に一言（対話を続ける問いかけ）
+・数値がnullのものは無理に決めつけない。「未取得」と言う。
   `.trim();
 
   const user = `
 以下は成績表JSONと集計結果です。
+このデータを元に「まなぶ先生AI」として講評を書いてください。
+
 【データ(JSON)】
 ${JSON.stringify(payload, null, 2)}
 `.trim();
@@ -582,13 +637,18 @@ export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
+    /* ---------- UIからの入力 ---------- */
+
+    // 単発：複数
     const singleFiles = fd
       .getAll("single")
       .filter((v): v is File => v instanceof File);
 
+    // 年間：1枚
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
 
+    // 講師設定
     const tone = (fd.get("tone")?.toString() ?? "gentle") as Tone;
     const target = (fd.get("target")?.toString() ?? "student") as Target;
 
@@ -604,6 +664,7 @@ export async function POST(req: NextRequest) {
       return new NextResponse("PDFがありません。", { status: 400 });
     }
 
+    /* ---------- Storage ---------- */
     const bucket = process.env.SUPABASE_PDF_BUCKET ?? "report-pdfs";
     const baseDir = `analyze/${crypto.randomUUID()}`;
 
@@ -621,11 +682,15 @@ export async function POST(req: NextRequest) {
       return { path, name: file.name, size: file.size };
     }
 
+    /* ---------- Upload ---------- */
     const uploadedSingles: { path: string; name: string; size: number }[] = [];
     for (const f of singleFiles) uploadedSingles.push(await upload(f));
 
     const uploadedYearly = yearlyFile ? await upload(yearlyFile) : null;
 
+    /* ---------- OCR + 成績表判定 + JSON化 ---------- */
+
+    // 単発は枚数制限（Vercelタイムアウト対策）
     const MAX_SINGLE_OCR = 5;
     const singleTargets = uploadedSingles.slice(0, MAX_SINGLE_OCR);
 
@@ -689,8 +754,8 @@ export async function POST(req: NextRequest) {
     }
 
     let yearlyOcrText: string | null = null;
-    let yearlyOcrError: string | null = null; // ★追加
-    let yearlyJudgeError: string | null = null; // ★追加
+    let yearlyOcrError: string | null = null;
+    let yearlyJudgeError: string | null = null;
 
     let yearlyGradeCheck:
       | { isGradeReport: boolean; confidence: number; reason: string }
@@ -764,19 +829,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    /* ---------- ②: JSONを使った分析集計（returnの直前で計算） ---------- */
     const singleJsonItems = (singleOcrResults ?? []).map((x: any) => ({
-      filename: x.name,
+      filename: x.name, // ★ x.filename ではなく x.name
       reportJson: x.reportJson,
     }));
 
     const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
     const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
 
+    /* ---------- ★追加：講評生成（commentary） ---------- */
     const singlesReportJson = (singleOcrResults ?? []).map((x: any) => ({
       name: x.name,
       reportJson: x.reportJson as ReportJson | null,
     }));
 
+    // ※講評は「成績表のJSONが1つも無い」場合、薄くなるのでガード
     const hasAnyReportJson =
       singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
 
@@ -792,6 +860,7 @@ export async function POST(req: NextRequest) {
         })
       : "成績表として読み取れたデータがまだありません。成績表PDFを入れてもう一度試してみてください。";
 
+    /* ---------- Response ---------- */
     return NextResponse.json({
       summary: `単発=${uploadedSingles.length}枚 / 年間=${
         uploadedYearly ? "あり" : "なし"
@@ -803,8 +872,8 @@ export async function POST(req: NextRequest) {
       ocr: {
         singles: singleOcrResults,
         yearly: yearlyOcrText,
-        yearlyError: yearlyOcrError, // ★追加：これが出れば原因特定できる
-        yearlyJudgeError, // ★追加
+        yearlyError: yearlyOcrError,
+        yearlyJudgeError,
         yearlyGradeCheck,
         yearlyReportJson,
         yearlyReportJsonMeta,
@@ -813,15 +882,19 @@ export async function POST(req: NextRequest) {
             ? `単発PDFが多いため、先頭${MAX_SINGLE_OCR}枚のみOCRしました`
             : null,
       },
+
       selections: {
         tone,
         focus,
         target,
       },
+
       analysis: {
         singles: singleAnalysis,
         yearly: yearlyAnalysis,
       },
+
+      // ★追加：講評（まなぶ先生AI）
       commentary,
     });
   } catch (e: any) {
