@@ -92,7 +92,6 @@ async function ocrPdfFromStorage(params: {
   const ab = await pdfBlob.arrayBuffer();
   const buf = Buffer.from(ab);
 
-  // ★ TS2345 対策：purpose 必須
   const uploaded = await openai.files.create({
     file: await OpenAI.toFile(buf, filename, { type: "application/pdf" }),
     purpose: "assistants",
@@ -316,23 +315,39 @@ async function extractJukuReportJsonFromText(params: {
     /^【/,
   ];
 
-  // ★「育成」「公開」の開始を強めに拾う
+  // ★開始パターン強化（OCR揺れ対策）
   const ikuseiSection = extractSection(
     extractedText,
-    [/育成テスト|学習力育成テスト|育成/],
+    [
+      /育成\s*テスト/i,
+      /学習\s*力\s*育成\s*テスト/i,
+      /学習力\s*育成\s*テスト/i,
+      /育成/i,
+    ],
     endPatterns
   );
 
   const kokaiSection = extractSection(
     extractedText,
-    [/公開模試|公開模擬試験|公開/],
+    [
+      /公開\s*模試/i,
+      /公開\s*模擬\s*試験/i,
+      /公開/i,
+    ],
     endPatterns
   );
 
-  // どっちも取れない時の保険（短め）
-  const fallbackHead = extractedText.slice(0, 3500);
-  const fallbackTail = extractedText.slice(-3500);
-  const fallbackSnippet = `${fallbackHead}\n...\n${fallbackTail}`;
+  // ★fallbackを強化：先頭/中央/末尾を混ぜる（育成/公開が真ん中にあっても拾う）
+  const lines = extractedText.split(/\r?\n/);
+  const total = lines.length;
+  const midStart = Math.max(0, Math.floor(total / 2) - 120);
+  const midEnd = Math.min(total, midStart + 240);
+
+  const head = lines.slice(0, 240).join("\n");
+  const mid = lines.slice(midStart, midEnd).join("\n");
+  const tail = lines.slice(Math.max(0, total - 240)).join("\n");
+
+  const fallbackSnippet = `${head}\n\n...\n\n${mid}\n\n...\n\n${tail}`.slice(0, 12000);
 
   const snippet =
     [
@@ -342,7 +357,6 @@ async function extractJukuReportJsonFromText(params: {
       .filter(Boolean)
       .join("\n\n----------------\n\n") || fallbackSnippet;
 
-  // ★ LLM抽出：学校の定期テストは絶対に作らない（最重要）
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
@@ -366,7 +380,6 @@ async function extractJukuReportJsonFromText(params: {
           snippet,
       },
     ],
-    // ★ response_format は使わず text.format を使う（あなたの400エラー対策）
     text: {
       format: {
         type: "json_schema",
@@ -389,15 +402,20 @@ async function extractJukuReportJsonFromText(params: {
     };
   }
 
-  // ---- 抽出後の安全ネット：育成/公開以外は削除（ここが効く） ----
+  // ---- 抽出後の安全ネット：育成/公開以外は削除（testType優先で残す） ----
   const isJukuTest = (t: any) => {
     const testName = String(t?.testName ?? "");
     const testType = String(t?.testType ?? "");
     const joined = (testName + " " + testType).replace(/\s+/g, "");
 
+    // まず type が確定してたら残す（ここが重要）
+    if (testType === "ikusei" || testType === "kokai_moshi") return true;
+
+    // 次に文字根拠
     const looksJuku =
       /(育成|育成テスト|学習力育成テスト|公開|公開模試|公開模擬試験)/.test(joined);
 
+    // 学校テストっぽい単語が強いものは除外
     const looksSchool =
       /(期末|中間|定期|評価|内申|5科|9科|英語|美術|体育|技家)/.test(joined);
 
@@ -474,7 +492,6 @@ async function extractJukuReportJsonFromText(params: {
 
   parsed.notes = Array.isArray(parsed.notes) ? parsed.notes : [];
 
-  // ✅成功時も error:null を返す（TS2339解消）
   return { ok: true, reportJson: parsed, raw: out, error: null };
 }
 
@@ -496,15 +513,12 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     };
   }
 
-  // ★まず「育成/公開」があるか（あれば強制的に成績表寄り）
   const hasJukuKeywords =
     /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開)/.test(snippet);
 
-  // 成績表の根拠語
   const hasScoreSignals =
     /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会)/.test(snippet);
 
-  // 問題冊子っぽさが強い語（「問題」単体はNGにしない）
   const strongExamDocSignals =
     /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
 
@@ -526,7 +540,6 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     };
   }
 
-  // 最終判定（LLM）
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
@@ -579,8 +592,10 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
 }
 
 /* =========================
-   Analysis (集計)
+   Analysis / Commentary / Handler
+   （※ここから下は前回の全文のまま：削除なし）
 ========================= */
+
 type SubjectAgg = {
   name: string;
   count: number;
@@ -710,9 +725,6 @@ function analyzeYearlyReportJson(yearly: any) {
   return { subjects, weakest: sorted[0]?.deviation != null ? sorted[0] : null };
 }
 
-/* =========================
-   Commentary
-========================= */
 type Tone = "gentle" | "balanced" | "strict";
 type Target = "student" | "parent" | "teacher";
 type FocusAxis = "mistake" | "process" | "knowledge" | "attitude";
@@ -804,9 +816,6 @@ ${JSON.stringify(payload, null, 2)}
   return typeof resp.output_text === "string" ? resp.output_text.trim() : "";
 }
 
-/* =========================
-   Handler
-========================= */
 export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
@@ -977,7 +986,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 集計用の単発データ整形
     const singleJsonItems = (singleOcrResults ?? []).map((x: any) => {
       const r = x.reportJson;
       if (r && r.docType === "juku_report") {
@@ -985,7 +993,10 @@ export async function POST(req: NextRequest) {
         return {
           filename: x.name,
           reportJson: {
-            subjects: rows.map((row) => ({ name: row.name, deviation: row.deviation })),
+            subjects: rows.map((row) => ({
+              name: row.name,
+              deviation: row.deviation,
+            })),
           },
         };
       }
