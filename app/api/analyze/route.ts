@@ -528,12 +528,22 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return { isGradeReport: false, confidence: 10, reason: "OCR結果がほぼ空でした（判定材料不足）" };
   }
 
-  const hasJukuKeywords = /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試)/.test(snippet);
-  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会)/.test(snippet);
+  // ★FIX：年間推移タイプ（「育成/公開」が薄い）でも成績表判定できるようにシグナルを追加
+  const hasJukuKeywords =
+    /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試|年間|推移|成績推移|年間成績|年間まとめ|まとめ|総括|年度|前期|後期)/.test(
+      snippet
+    );
+
+  // ★FIX：年間表で出やすい語も追加（平均・年度平均など）
+  const hasScoreSignals =
+    /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会|年度平均|年間平均|平均偏差|平均順位)/.test(
+      snippet
+    );
+
   const strongExamDocSignals = /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
 
   if (hasJukuKeywords && hasScoreSignals) {
-    return { isGradeReport: true, confidence: 98, reason: "育成/公開と成績指標語が確認できたため" };
+    return { isGradeReport: true, confidence: 98, reason: "成績推移/年間を含む成績指標語が確認できたため" };
   }
 
   if (strongExamDocSignals && !hasScoreSignals) {
@@ -546,7 +556,8 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
       {
         role: "system",
         content:
-          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。",
+          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。" +
+          "加えて、年間の成績推移表（年間/推移/年度/前期/後期/年間平均 など）も成績表として判定してください。",
       },
       { role: "user", content: `ファイル名: ${filename}\n\nOCRテキスト（抜粋）:\n${snippet}` },
     ],
