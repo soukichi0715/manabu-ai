@@ -165,8 +165,9 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
           { type: "input_file", file_id: uploaded.id },
           {
             type: "input_text",
+            // ★FIX-1：全ページOCR＋省略禁止＋ページ番号
             text:
-              "このPDFはスキャン画像の可能性があります。OCRして、表の項目名と数値を漏れなくテキスト化してください。未記入は「空欄」と明記し、推測で埋めないでください。",
+              "このPDFはスキャン画像の可能性があります。必ず全ページをOCRし、ページ番号を付けて順番通りに全文を出力してください。要約は禁止。省略禁止。表は行・列が分かる形（可能ならMarkdown表）で転記してください。未記入は「空欄」と明記し、推測で埋めないでください。",
           },
         ],
       },
@@ -342,13 +343,20 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     endPatterns
   );
 
+  // ★FIX-2：公開模試は「V. 公開模試成績」を明示的に拾う（Ⅳ.標準化公開模擬平均の誤爆を防止）
   const kokaiSection = extractSection(
     extractedText,
-    [/公開\s*模試/i, /公開\s*模擬\s*試験/i, /公開/i, /模試/i],
+    [
+      /^V\.\s*公開模試成績/i,
+      /公開模試成績/i,
+      /本人の前期平均/i,
+      /本人の後期平均/i,
+      /本人の年間平均/i,
+    ],
     endPatterns
   );
 
-  // ★FIX：年間推移は「1〜4（総合学力診断/順位/偏差値/最近5回/学力推移）」から拾う
+  // 年間推移は「1〜4（総合学力診断/順位/偏差値/最近5回/学力推移）」から拾う
   const yearlySection = extractSection(
     extractedText,
     [
@@ -383,6 +391,10 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
       /社会/i,
       /総合学力診断/i,
       /学力推移/i,
+      /公開模試成績/i,
+      /前期平均/i,
+      /後期平均/i,
+      /年間平均/i,
     ],
     45,
     6
@@ -426,7 +438,8 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
           "【超重要】学校の定期テスト（期末/中間/定期/評価/内申/5科/9科/英語/美術/体育/技家）は絶対に抽出しない。" +
           "ただし、年間推移ブロック内に英語などが混ざっていても、国語/算数/理科/社会と2科/4科に関係する情報だけ抽出し、それ以外は無視する。" +
           "推測は禁止。見えない/不明はnull。空欄はnull。" +
-          "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。",
+          "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。" +
+          "【公開模試】公開模試のブロックに科目別の数値が無く、4科目/2科目の『得点』『偏差』および『本人の前期平均/本人の後期平均/本人の年間平均』しか無い場合は、subjectsは全てnullのままでよい。その代わり totals.four と totals.two に得点・偏差を入れる。前期平均/後期平均/年間平均は notes に文字列で残す。",
       },
       {
         role: "user",
@@ -786,7 +799,7 @@ export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
-    // ★FIX（今回の追加）：FormDataEntryValue に型注釈を付けて "v implicitly any" を消す
+    // FormDataEntryValue に型注釈を付けて "v implicitly any" を消す
     const singleFiles = fd
       .getAll("single")
       .filter((v: FormDataEntryValue): v is File => v instanceof File);
