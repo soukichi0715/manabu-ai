@@ -157,7 +157,7 @@ function isGakuhanLike(s: string) {
 function parseYmdOrYmLoose(s: string): string | null {
   const t = String(s ?? "").trim();
 
-  // YYYY/M/D or YYYY-M-D etc
+  // YYYY/M/D or YYYY-M-D or YYYY M D etc
   const m1 = t.match(/(20\d{2})\s*[\/\-\.\s]\s*(\d{1,2})\s*[\/\-\.\s]\s*(\d{1,2})/);
   if (m1) {
     const yy = Number(m1[1]);
@@ -296,13 +296,15 @@ function fixIkuseiTwoFourMix(t: any) {
 ========================= */
 function detectYearlyFormatFromOcrText(text: string): YearlyFormat {
   const t = String(text ?? "");
+
   // 5年でよく出る表記
   if (/Public模試成績/i.test(t)) return "B";
   if (/年間学習力育成テスト/i.test(t)) return "B";
+  if (/(Ⅲ|III)\s*[\.．]\s*年間学習力育成テスト/i.test(t)) return "B";
 
   // 6年でよく出る表記
-  if (/V\.\s*公開模試成績/i.test(t)) return "A";
-  if (/III\.\s*前期学習力育成テスト/i.test(t)) return "A";
+  if (/(V|Ⅴ)\s*[\.．]\s*公開模試成績/i.test(t)) return "A";
+  if (/(Ⅲ|III)\s*[\.．]\s*前期学習力育成テスト/i.test(t)) return "A";
 
   // どちらとも言えないが、公開/育成の語があればとりあえずAで試す（後でBも試す）
   if (/公開模試成績|公開模試|育成テスト/.test(t)) return "A";
@@ -337,8 +339,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
             { type: "input_file", file_id: uploaded.id },
             {
               type: "input_text",
-              text:
-                "PDFをページ番号付きでOCR転記してください。要約禁止。推測禁止。省略禁止。表は可能な限り表形式で。",
+              text: "PDFをページ番号付きでOCR転記してください。要約禁止。推測禁止。省略禁止。表は可能な限り表形式で。",
             },
           ],
         },
@@ -356,11 +357,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
 /* =========================
    Build yearly JSON from OCR text (format aware)
 ========================= */
-function buildYearlyFromOcrTextByFormat(
-  ocrText: string,
-  sourceFilename: string,
-  format: Exclude<YearlyFormat, "auto">
-) {
+function buildYearlyFromOcrTextByFormat(ocrText: string, sourceFilename: string, format: Exclude<YearlyFormat, "auto">) {
   const yearly: JukuReportJson = {
     docType: "juku_report",
     student: { name: null, id: null },
@@ -370,28 +367,37 @@ function buildYearlyFromOcrTextByFormat(
   };
 
   // ===== 育成ブロック =====
+  // 「III.」と「Ⅲ．」両対応
   const ikuseiStarts =
     format === "A"
-      ? [/III\.\s*前期学習力育成テスト出題範囲及び成績/i, /III\.\s*前期学習力育成テスト/i]
-      : [/III\.\s*年間学習力育成テスト出題範囲及び成績/i, /III\.\s*年間学習力育成テスト/i];
+      ? [
+          /(III|Ⅲ)\s*[\.．]\s*前期学習力育成テスト出題範囲及び成績/i,
+          /(III|Ⅲ)\s*[\.．]\s*前期学習力育成テスト/i,
+        ]
+      : [
+          /(III|Ⅲ)\s*[\.．]\s*年間学習力育成テスト出題範囲及び成績/i,
+          /(III|Ⅲ)\s*[\.．]\s*年間学習力育成テスト/i,
+        ];
 
   const ikuseiEnds = [
     /思考力育成テスト/i,
     /合格力実践テスト/i,
-    /IV\./i,
-    /V\./i,
+    /(IV|Ⅳ)\s*[\.．]/i,
+    /(V|Ⅴ)\s*[\.．]/i,
     /公開模試/i,
     /Public模試/i,
   ];
 
   const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
 
+  // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 |
   const ikuseiRowRe =
     /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|/g;
 
   for (const m of ikuseiBlock.matchAll(ikuseiRowRe)) {
     const n = Number(m[1]);
     const date = parseYmdOrYmLoose(m[2]);
+    if (!date) continue; // ★日付が取れない行は捨てる
 
     const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
     const fourGrade = clampNum(toNumberOrNull(m[4]), 0, 10);
@@ -420,8 +426,8 @@ function buildYearlyFromOcrTextByFormat(
   // ===== 公開ブロック =====
   const kokaiStarts =
     format === "A"
-      ? [/V\.\s*公開模試成績/i, /公開模試成績/i]
-      : [/Public模試成績/i, /公開模試成績/i, /V\.\s*公開模試成績/i];
+      ? [/(V|Ⅴ)\s*[\.．]\s*公開模試成績/i, /公開模試成績/i]
+      : [/Public模試成績/i, /公開模試成績/i, /(V|Ⅴ)\s*[\.．]\s*公開模試成績/i];
 
   const kokaiEnds = [
     /春期/i,
@@ -434,12 +440,14 @@ function buildYearlyFromOcrTextByFormat(
 
   const kokaiBlock = sliceBetweenAny(ocrText, kokaiStarts, kokaiEnds);
 
+  // | 回 | 年月日(または年月) | 4科得点 | 偏差 | 2科得点 | 偏差 |
   const kokaiRowRe =
     /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
 
   for (const m of kokaiBlock.matchAll(kokaiRowRe)) {
     const n = Number(m[1]);
     const date = parseYmdOrYmLoose(m[2]);
+    if (!date) continue; // ★日付が取れない（前年度平均など）行は捨てる
 
     const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
     const fourDev = clampNum(toNumberOrNull(m[4]), 10, 90);
@@ -465,16 +473,14 @@ function buildYearlyFromOcrTextByFormat(
     yearly.tests.push(t);
   }
 
+  // 念のため：育成/公開のみ + 学判除外
   yearly.tests = yearly.tests
     .map((t: any) => {
       const nm = String(t?.testName ?? "");
       const tt = normalizeTestTypeLabel(nm);
       return { ...t, testType: tt };
     })
-    .filter(
-      (t: any) =>
-        (t.testType === "ikusei" || t.testType === "kokai_moshi") && !isGakuhanLike(String(t?.testName ?? ""))
-    );
+    .filter((t: any) => (t.testType === "ikusei" || t.testType === "kokai_moshi") && !isGakuhanLike(String(t?.testName ?? "")));
 
   yearly.tests.sort((a, b) => {
     const da = a.date ?? "";
@@ -490,14 +496,26 @@ function buildYearlyFromOcrTextByFormat(
 
 function buildYearlyFromOcrTextAuto(ocrText: string, sourceFilename: string) {
   const detected = detectYearlyFormatFromOcrText(ocrText);
+  // autoの時は A→B の順で試して、件数が多い方を採用
   const a = buildYearlyFromOcrTextByFormat(ocrText, sourceFilename, "A");
   const b = buildYearlyFromOcrTextByFormat(ocrText, sourceFilename, "B");
 
   const aCount = a.tests?.length ?? 0;
   const bCount = b.tests?.length ?? 0;
 
-  const best = aCount >= bCount ? a : b;
-  const bestFmt: Exclude<YearlyFormat, "auto"> = aCount >= bCount ? "A" : "B";
+  // ★同数なら detected を優先（ここが今回の致命点）
+  let best = aCount > bCount ? a : bCount > aCount ? b : null;
+  let bestFmt: Exclude<YearlyFormat, "auto"> = aCount > bCount ? "A" : bCount > aCount ? "B" : "A";
+
+  if (!best) {
+    if (detected === "B") {
+      best = b;
+      bestFmt = "B";
+    } else {
+      best = a;
+      bestFmt = "A";
+    }
+  }
 
   return { yearly: best, detected, chosen: bestFmt, aCount, bCount };
 }
@@ -668,9 +686,7 @@ export async function POST(req: NextRequest) {
     // 任意：UIが無くてもOK。後から付けられる
     const yearlyFormatRaw = fd.get("yearlyFormat");
     const yearlyFormat: YearlyFormat =
-      yearlyFormatRaw === "A" || yearlyFormatRaw === "B" || yearlyFormatRaw === "auto"
-        ? (yearlyFormatRaw as any)
-        : "auto";
+      yearlyFormatRaw === "A" || yearlyFormatRaw === "B" || yearlyFormatRaw === "auto" ? (yearlyFormatRaw as any) : "auto";
 
     if (singleFiles.length === 0 && !yearlyFile) {
       return new NextResponse("PDFがありません。", { status: 400 });
