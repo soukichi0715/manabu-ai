@@ -296,9 +296,6 @@ function fixKokaiFourScoreIfSuspicious(t: any) {
     t.totals.four.deviation = null;
   }
 
-  // 4科の得点が無いなら「4科としては無い」扱いに寄せたい場合の余地
-  // if (fourScore == null && fourDev != null) t.totals.four.deviation = null;
-
   // 参照だけで未使用にならないように（将来拡張用）
   void fourDev;
 }
@@ -328,8 +325,13 @@ function detectYearlyFormatFromOcrText(text: string): YearlyFormat {
 /* =========================
    OCR (PDF -> text)
 ========================= */
-async function ocrPdfFromStorage(params: { bucket: string; path: string; filename: string }) {
-  const { bucket, path, filename } = params;
+async function ocrPdfFromStorage(params: {
+  bucket: string;
+  path: string;
+  filename: string;
+  focusHint?: string; // ✅追加：トークン切れ対策で「必要箇所だけ」優先OCR
+}) {
+  const { bucket, path, filename, focusHint } = params;
 
   const { data: pdfBlob, error } = await supabase.storage.from(bucket).download(path);
   if (error || !pdfBlob) throw new Error(`Supabase download failed: ${error?.message}`);
@@ -343,6 +345,13 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
   });
 
   try {
+    const base =
+      "PDFをページ番号付きでOCR転記してください。要約禁止。推測禁止。省略禁止。表は可能な限り表形式で。";
+
+    const focus = focusHint
+      ? `\n\n【重要】今回は次の内容が載っている箇所だけを優先して転記して：\n${focusHint}\n（それ以外は省略してOK）`
+      : "";
+
     const resp = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [
@@ -350,10 +359,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
           role: "user",
           content: [
             { type: "input_file", file_id: uploaded.id },
-            {
-              type: "input_text",
-              text: "PDFをページ番号付きでOCR転記してください。要約禁止。推測禁止。省略禁止。表は可能な限り表形式で。",
-            },
+            { type: "input_text", text: base + focus },
           ],
         },
       ],
@@ -458,8 +464,7 @@ function buildYearlyFromOcrTextByFormat(
 
   const kokaiBlock = sliceBetweenAny(ocrText, kokaiStarts, kokaiEnds);
 
-  // | 回 | 年月日(または年月/年) | 4科得点 | 偏差 | 2科得点 | 偏差 |
-  // ✅ 追加：分割日付版（| 回 | 年 | 月 | 日 | 4科得点 | 偏差 | 2科得点 | 偏差 |）にも対応
+  // ✅ 分割日付版（| 回 | 年 | 月 | 日 | 4科得点 | 偏差 | 2科得点 | 偏差 |）
   const kokaiRowReSplit =
     /\|\s*(\d{1,2})\s*\|\s*(20\d{2})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
 
@@ -802,13 +807,25 @@ export async function POST(req: NextRequest) {
     let yearlyDebug: any | null = null;
 
     if (uploadedYearly) {
-      // OCR
+      // ✅ OCR（育成フォーカス＋公開フォーカスの2回に分ける：公開が消える問題の根本対策）
       try {
-        yearlyOcrText = await ocrPdfFromStorage({
+        const yearlyOcrTextIkusei = await ocrPdfFromStorage({
           bucket,
           path: uploadedYearly.path,
           filename: uploadedYearly.name,
+          focusHint:
+            "III. 前期/前年 学習力育成テスト 出題範囲及び成績（回数・試験実施日・4科目得点・評価・2科目得点・評価の表）",
         });
+
+        const yearlyOcrTextKokai = await ocrPdfFromStorage({
+          bucket,
+          path: uploadedYearly.path,
+          filename: uploadedYearly.name,
+          focusHint:
+            "V. 公開模試成績（回数・年/月/日・4科得点・偏差・2科得点・偏差の表）",
+        });
+
+        yearlyOcrText = [yearlyOcrTextIkusei, yearlyOcrTextKokai].filter(Boolean).join("\n\n---\n\n");
       } catch (e: any) {
         yearlyOcrText = null;
         yearlyOcrError = e?.message ?? "yearly OCR error";
