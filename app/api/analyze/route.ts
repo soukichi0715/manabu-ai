@@ -148,16 +148,11 @@ function isGakuhanLike(s: string) {
  * - YYYY/M/D → YYYY-MM-DD
  * - YYYY/M   → YYYY-MM-01
  * - YYYY     → YYYY-01-01（年だけでも落とさない）
+ *
+ * ✅重要：精度優先で「具体日付→年月→年のみ」の順に判定する
  */
 function parseYmdOrYmLoose(s: string): string | null {
   const t = String(s ?? "").trim();
-
-  // YYYY only
-  const m0 = t.match(/\b(20\d{2})\b/);
-  if (m0) {
-    const yy = Number(m0[1]);
-    return `${String(yy).padStart(4, "0")}-01-01`;
-  }
 
   // YYYY/M/D or YYYY-M-D etc
   const m1 = t.match(/(20\d{2})\s*[\/\-\.\s]\s*(\d{1,2})\s*[\/\-\.\s]\s*(\d{1,2})/);
@@ -178,6 +173,13 @@ function parseYmdOrYmLoose(s: string): string | null {
     if (mm >= 1 && mm <= 12) {
       return `${String(yy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-01`;
     }
+  }
+
+  // YYYY only（最後の保険）
+  const m0 = t.match(/\b(20\d{2})\b/);
+  if (m0) {
+    const yy = Number(m0[1]);
+    return `${String(yy).padStart(4, "0")}-01-01`;
   }
 
   return null;
@@ -293,7 +295,8 @@ function detectYearlyFormatFromOcrText(text: string): YearlyFormat {
 
   // 6年寄り（A）
   if (/(V|Ⅴ)\s*[\.．]\s*公開模試成績/i.test(t)) return "A";
-  if (/(Ⅲ|III)\s*[\.．]\s*前期学習力育成テスト/i.test(t)) return "A";
+  // ✅ 6年：「前期」「前年」両方許可
+  if (/(Ⅲ|III)\s*[\.．]\s*(前期|前年)学習力育成テスト/i.test(t)) return "A";
 
   // どちらとも言えないが、公開/育成の語があればAを先に試す
   if (/公開模試成績|公開模試|育成テスト/.test(t)) return "A";
@@ -363,8 +366,9 @@ function buildYearlyFromOcrTextByFormat(
   const ikuseiStarts =
     format === "A"
       ? [
-          /(III|Ⅲ)\s*[\.．]\s*前期学習力育成テスト出題範囲及び成績/i,
-          /(III|Ⅲ)\s*[\.．]\s*前期学習力育成テスト/i,
+          // ✅ 6年：「前期」「前年」どちらも対応
+          /(III|Ⅲ)\s*[\.．]\s*(前期|前年)学習力育成テスト出題範囲及び成績/i,
+          /(III|Ⅲ)\s*[\.．]\s*(前期|前年)学習力育成テスト/i,
         ]
       : [
           /(III|Ⅲ)\s*[\.．]\s*年間学習力育成テスト出題範囲及び成績/i,
@@ -382,9 +386,10 @@ function buildYearlyFromOcrTextByFormat(
 
   const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
 
-  // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 |
+  // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 | ・・・（右に列が続いてもOK）
+  // ✅ 6年：右側に単元などの列が続くので、行末まで許可する
   const ikuseiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|[^\r\n]*(?:\r?\n|$)/g;
 
   for (const m of ikuseiBlock.matchAll(ikuseiRowRe)) {
     const n = Number(m[1]);
