@@ -64,6 +64,25 @@ type JukuReportJson = {
 
 type YearlyFormat = "auto" | "A" | "B";
 
+/** ✅ 追加：UI表示用レポート型 */
+type Menndan1Min = { title: string; body: string; bullets?: string[]; tags?: string[] };
+type ChildSimple = { title: string; body: string; action?: string };
+type ParentHandout = { title: string; summary: string; points: string[]; nextAction: string };
+type Reports = {
+  menndan_1min: Menndan1Min;
+  child_simple: ChildSimple;
+  parent_handout: ParentHandout;
+};
+
+/** ✅ 追加：単発ミス分析（まずはスタブ。単発OCR接続後に本実装へ） */
+type MistakeSummary = {
+  status: "not-implemented" | "no-single" | "ok";
+  message: string;
+  subject?: string;
+  byLevel?: { A: { total: number; miss: number }; B: { total: number; miss: number }; C: { total: number; miss: number } };
+  items?: Array<{ q: number; rate: number; correct: boolean; level: "A" | "B" | "C" }>;
+};
+
 /**
  * ✅ Schemaエラー回避：docTypeにtype必須
  * ※ tests の詳細はここでは縛らず、抽出後に整形する方針
@@ -875,6 +894,168 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
 }
 
 /* =========================
+   ✅ 追加：reports / mistakeSummary builder
+========================= */
+function pickReportCase(trends: ReturnType<typeof extractYearlyTrends>, warnings: string[]) {
+  const ik = trends.ikusei?.trend ?? "unknown";
+  const kk = trends.kokai?.trend ?? "unknown";
+
+  // ざっくり3分類（UIで差が見えることが目的）
+  if (kk === "up" || ik === "up") return "rising";
+  if (kk === "down") return "unstable";
+  if (ik === "flat" && kk === "flat") return "stable";
+  if (ik === "unknown" && kk === "unknown") {
+    warnings.push("年間推移の数値が少なく、レポートは暫定コメントになります。");
+    return "unknown";
+  }
+  // default
+  return "stable";
+}
+
+function buildReports(params: {
+  analysisMode: AnalysisMode;
+  studentType: StudentType;
+  isTwoSubjectStudent: boolean;
+  trends: ReturnType<typeof extractYearlyTrends>;
+  warnings: string[];
+}): Reports {
+  const { analysisMode, studentType, isTwoSubjectStudent, trends, warnings } = params;
+
+  const c = pickReportCase(trends, warnings);
+
+  const studentLabel =
+    studentType === "two"
+      ? "（2科目生）"
+      : isTwoSubjectStudent
+        ? "（2科目生）"
+        : "（4科目生想定）";
+
+  const baseTitle = analysisMode === "yearly-only" ? `面談用コメント（暫定：年間のみ）${studentLabel}` : `面談用コメント（1分版）${studentLabel}`;
+
+  if (c === "rising") {
+    return {
+      menndan_1min: {
+        title: baseTitle,
+        body:
+          "推移を見ると、ここ数か月で上向きの動きが出ています。\n" +
+          "育成・公開のどちらか（または両方）で上昇傾向が見えており、努力が結果に結びつき始めている段階です。\n\n" +
+          "次回は『取れる問題を安定して取り切る』ことに絞ると、伸びが定着しやすくなります。\n" +
+          "（単発の○×正答率一覧が入ると、どの難度で落としているかまで精密に確認できます。）",
+        bullets: [
+          "年間推移は上向きの兆し",
+          "次は『標準問題の取り切り』で安定化",
+          "単発○×が入ると優先課題が確定",
+        ],
+        tags: ["上昇", "伸び始め", "定着"],
+      },
+      child_simple: {
+        title: "きみへのメッセージ",
+        body:
+          "さいきん、少しずつできることが増えてきたよ。\n" +
+          "つぎは『みんなができる問題』をていねいに取るだけでOK。\n" +
+          "あせらず、1つずついこう！",
+        action: "途中式を1行でも書いてから答える",
+      },
+      parent_handout: {
+        title: "成績状況のご報告（要点）",
+        summary:
+          "成績は上向きの兆しが見えています。次は標準問題の取り切りを意識することで、伸びが定着しやすくなります。",
+        points: [
+          "年間推移：上昇傾向の兆し",
+          "課題：標準問題の安定得点",
+          "単発○×正答率で優先課題を確定可能",
+        ],
+        nextAction: "標準問題の見直しルール（最後5分）を固定する",
+      },
+    };
+  }
+
+  if (c === "unstable") {
+    return {
+      menndan_1min: {
+        title: baseTitle,
+        body:
+          "推移を見ると、力はある一方で結果に波が出やすい状態です。\n" +
+          "このタイプは『難しい問題を増やす』よりも、『取りこぼしを減らす』方が伸びます。\n\n" +
+          "次回は、易〜標準の取り切り（計算チェック・見直し手順の固定）を最優先にします。\n" +
+          "（単発の○×正答率一覧が入ると、A/B/Cのどこで落ちているかが明確になります。）",
+        bullets: [
+          "結果に波が出やすい",
+          "優先は『取りこぼし削減』",
+          "見直し手順の固定が効く",
+        ],
+        tags: ["不安定", "精度", "見直し"],
+      },
+      child_simple: {
+        title: "きみへのメッセージ",
+        body:
+          "できる力はあるよ。\n" +
+          "でも、ときどき『かんたんな問題』でミスが出ちゃうことがある。\n" +
+          "つぎは『かんたんな問題をぜったい落とさない』をいちばん大事にしよう。",
+        action: "さいごの3分でかんたんな問題だけ見直す",
+      },
+      parent_handout: {
+        title: "成績状況のご報告（要点）",
+        summary:
+          "学力はありますが、結果に波が出やすい状態です。易〜標準の取りこぼし削減を優先すると安定しやすくなります。",
+        points: [
+          "年間推移：上下の波が見られる",
+          "課題：易〜標準の取りこぼし",
+          "次回：見直し手順の固定が最優先",
+        ],
+        nextAction: "計算チェック／見直しの型を1つに固定する",
+      },
+    };
+  }
+
+  // stable / unknown
+  return {
+    menndan_1min: {
+      title: baseTitle,
+      body:
+        "推移を見ると、現状は大きく崩れてはいません。\n" +
+        "次に伸ばすには、『取れる問題を安定して取り切る』ことを軸にすると効果が出やすいです。\n\n" +
+        "単発の○×正答率一覧が入ると、A/B/Cのどこを優先するべきかが確定し、面談コメントもより具体化できます。",
+      bullets: [
+        "大崩れはしていない",
+        "次は『標準問題の取り切り』で伸びやすい",
+        "単発○×が入ると精密化できる",
+      ],
+      tags: ["安定", "次の一手", "標準問題"],
+    },
+    child_simple: {
+      title: "きみへのメッセージ",
+      body:
+        "いまのきみは、しっかり力がついてきてるよ。\n" +
+        "つぎは『ふつうの問題をまちがえない』を大事にしよう。",
+      action: "ふつうの問題を1回だけ見直す",
+    },
+    parent_handout: {
+      title: "成績状況のご報告（要点）",
+      summary:
+        "成績は安定しています。次は標準問題の取り切りを軸に、得点の安定感を高めていきます。",
+      points: [
+        "年間推移：大きな崩れはなし",
+        "課題：標準問題の安定得点",
+        "単発○×正答率で優先課題を確定可能",
+      ],
+      nextAction: "標準問題の見直しルールを継続する",
+    },
+  };
+}
+
+function buildMistakeSummary(uploadedSinglesCount: number): MistakeSummary {
+  if (uploadedSinglesCount <= 0) {
+    return { status: "no-single", message: "単発PDFが未投入のため、○×正答率からのミス分析は未実施です。" };
+  }
+  // まだ単発OCRを繋いでいない段階なので、まずはスタブでUIを動かす
+  return {
+    status: "not-implemented",
+    message: "単発PDFの○×正答率一覧の抽出（OCR/パース）が未接続です。接続後にA/B/C難度分類とミス傾向が出ます。",
+  };
+}
+
+/* =========================
    Model helper
 ========================= */
 function leadingModelName() {
@@ -1007,6 +1188,18 @@ export async function POST(req: NextRequest) {
 
     const trends = extractYearlyTrends(yearlyReportJson as any);
 
+    // ✅ 追加：reports（UIにそのまま渡せる）
+    const reports: Reports = buildReports({
+      analysisMode,
+      studentType,
+      isTwoSubjectStudent,
+      trends,
+      warnings,
+    });
+
+    // ✅ 追加：mistakeSummary（まずはUI確認用スタブ）
+    const mistakeSummary: MistakeSummary = buildMistakeSummary(uploadedSingles.length);
+
     return NextResponse.json({
       summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
 
@@ -1015,6 +1208,12 @@ export async function POST(req: NextRequest) {
       studentType,
       isTwoSubjectStudent,
       warnings,
+
+      // ✅ 追加：レポート（面談/配布/子ども向け）
+      reports,
+
+      // ✅ 追加：単発ミス分析（スタブ）
+      mistakeSummary,
 
       files: { singles: uploadedSingles, yearly: uploadedYearly },
       ocr: {
