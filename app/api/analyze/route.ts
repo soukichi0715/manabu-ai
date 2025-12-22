@@ -632,6 +632,112 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 }
 
 /* =========================
+   Quality scoring (追加)
+   - OCR regex版 と direct版 の「良い方」を自動採用するためのスコア
+========================= */
+function computeYearlyQualityScore(yearly: any | null) {
+  if (!yearly || !Array.isArray(yearly.tests)) {
+    return {
+      score: 0,
+      tests: 0,
+      ikusei: { tests: 0, haveGrade: 0, haveTwoScore: 0, haveFourScore: 0, haveDate: 0 },
+      kokai: { tests: 0, haveDev: 0, haveTwoScore: 0, haveFourScore: 0, haveDate: 0 },
+    };
+  }
+
+  const tests = yearly.tests ?? [];
+  let score = 0;
+
+  const ik = { tests: 0, haveGrade: 0, haveTwoScore: 0, haveFourScore: 0, haveDate: 0 };
+  const ko = { tests: 0, haveDev: 0, haveTwoScore: 0, haveFourScore: 0, haveDate: 0 };
+
+  for (const t of tests) {
+    const tt = String(t?.testType ?? "");
+    const dateOk = typeof t?.date === "string" && t.date.length >= 4;
+
+    const twoScoreOk = toNumberOrNull(t?.totals?.two?.score) != null;
+    const fourScoreOk = toNumberOrNull(t?.totals?.four?.score) != null;
+
+    if (tt === "ikusei") {
+      ik.tests++;
+      if (dateOk) ik.haveDate++;
+      if (twoScoreOk) ik.haveTwoScore++;
+      if (fourScoreOk) ik.haveFourScore++;
+
+      const g = toNumberOrNull(t?.totals?.two?.grade);
+      const gradeOk = g != null && g >= 0 && g <= 10;
+      if (gradeOk) ik.haveGrade++;
+
+      // 育成は「評価」が命なので重みを強く
+      score += (dateOk ? 1 : 0) + (twoScoreOk ? 2 : 0) + (fourScoreOk ? 1 : 0) + (gradeOk ? 4 : 0);
+    }
+
+    if (tt === "kokai_moshi") {
+      ko.tests++;
+      if (dateOk) ko.haveDate++;
+      if (twoScoreOk) ko.haveTwoScore++;
+      if (fourScoreOk) ko.haveFourScore++;
+
+      const d4 = toNumberOrNull(t?.totals?.four?.deviation);
+      const d2 = toNumberOrNull(t?.totals?.two?.deviation);
+      const dev = d4 != null ? d4 : d2;
+      const devOk = dev != null && dev >= 10 && dev <= 90;
+      if (devOk) ko.haveDev++;
+
+      // 公開は「偏差」が命なので重みを強く
+      score += (dateOk ? 1 : 0) + (twoScoreOk ? 1 : 0) + (fourScoreOk ? 2 : 0) + (devOk ? 4 : 0);
+    }
+  }
+
+  // 総テスト数も評価（ただし過剰に効かせない）
+  score += Math.min(10, tests.length);
+
+  return {
+    score,
+    tests: tests.length,
+    ikusei: ik,
+    kokai: ko,
+  };
+}
+
+function chooseBetterYearly(params: {
+  ocrYearly: any | null;
+  directYearly: any | null;
+  prefer?: "ocr" | "direct";
+}) {
+  const { ocrYearly, directYearly, prefer } = params;
+
+  const o = computeYearlyQualityScore(ocrYearly);
+  const d = computeYearlyQualityScore(directYearly);
+
+  if (!ocrYearly && directYearly) {
+    return { chosen: directYearly, chosenBy: "direct-only", ocrScore: o, directScore: d };
+  }
+  if (ocrYearly && !directYearly) {
+    return { chosen: ocrYearly, chosenBy: "ocr-only", ocrScore: o, directScore: d };
+  }
+  if (!ocrYearly && !directYearly) {
+    return { chosen: null, chosenBy: "none", ocrScore: o, directScore: d };
+  }
+
+  // 両方ある場合：スコアで勝った方（同点なら prefer、無指定ならOCR優先）
+  if (d.score > o.score) {
+    return { chosen: directYearly, chosenBy: "direct-better", ocrScore: o, directScore: d };
+  }
+  if (o.score > d.score) {
+    return { chosen: ocrYearly, chosenBy: "ocr-better", ocrScore: o, directScore: d };
+  }
+
+  const tie = prefer ?? "ocr";
+  return {
+    chosen: tie === "direct" ? directYearly : ocrYearly,
+    chosenBy: tie === "direct" ? "tie-direct" : "tie-ocr",
+    ocrScore: o,
+    directScore: d,
+  };
+}
+
+/* =========================
    Trends
 ========================= */
 function judgeTrend(vals: number[], threshold: number): Trend {
@@ -726,6 +832,11 @@ export async function POST(req: NextRequest) {
     let yearlyReportJsonMeta: { ok: boolean; error: string | null } | null = null;
     let yearlyDebug: any | null = null;
 
+    // ✅ 追加：併走のための保持
+    let yearlyReportJsonOcr: any | null = null;
+    let yearlyReportJsonDirect: any | null = null;
+    let yearlyDirectMeta: any | null = null;
+
     if (uploadedYearly) {
       // OCR
       try {
@@ -740,20 +851,34 @@ export async function POST(req: NextRequest) {
         console.error("[yearly OCR error]", uploadedYearly?.name, e);
       }
 
+      // ✅ 追加：OCRが取れていても「direct抽出」を併走
+      const extractedYearlyDirect = await extractJukuReportJsonDirectFromPdf({
+        bucket,
+        path: uploadedYearly.path,
+        filename: uploadedYearly.name,
+        mode: "yearly",
+      });
+      yearlyReportJsonDirect = extractedYearlyDirect.reportJson;
+      yearlyDirectMeta = {
+        ok: extractedYearlyDirect.ok,
+        error: extractedYearlyDirect.ok ? null : extractedYearlyDirect.error ?? "direct JSON化に失敗",
+        rawLen: extractedYearlyDirect.raw?.length ?? 0,
+      };
+
       // OCR→正規表現抽出（推奨）
       if (yearlyOcrText) {
         if (yearlyFormat === "A" || yearlyFormat === "B") {
-          yearlyReportJson = buildYearlyFromOcrTextByFormat(yearlyOcrText, uploadedYearly.name, yearlyFormat);
+          yearlyReportJsonOcr = buildYearlyFromOcrTextByFormat(yearlyOcrText, uploadedYearly.name, yearlyFormat);
           yearlyReportJsonMeta = { ok: true, error: null };
           yearlyDebug = {
             mode: "yearly-ocr-regex",
             forcedFormat: yearlyFormat,
             ocrLen: yearlyOcrText.length,
-            extractedTests: yearlyReportJson.tests?.length ?? 0,
+            extractedTests: yearlyReportJsonOcr.tests?.length ?? 0,
           };
         } else {
           const auto = buildYearlyFromOcrTextAuto(yearlyOcrText, uploadedYearly.name);
-          yearlyReportJson = auto.yearly;
+          yearlyReportJsonOcr = auto.yearly;
           yearlyReportJsonMeta = { ok: true, error: null };
           yearlyDebug = {
             mode: "yearly-ocr-regex",
@@ -762,25 +887,45 @@ export async function POST(req: NextRequest) {
             tryA: auto.aCount,
             tryB: auto.bCount,
             ocrLen: yearlyOcrText.length,
-            extractedTests: yearlyReportJson.tests?.length ?? 0,
+            extractedTests: yearlyReportJsonOcr.tests?.length ?? 0,
           };
         }
       } else {
         // 保険：direct抽出（OCRが取れない場合）
-        const extractedYearly = await extractJukuReportJsonDirectFromPdf({
-          bucket,
-          path: uploadedYearly.path,
-          filename: uploadedYearly.name,
-          mode: "yearly",
-        });
-
-        yearlyReportJson = extractedYearly.reportJson;
+        yearlyReportJsonOcr = null;
         yearlyReportJsonMeta = {
-          ok: extractedYearly.ok,
-          error: extractedYearly.ok ? null : extractedYearly.error ?? "JSON化に失敗",
+          ok: false,
+          error: yearlyOcrError ?? "OCRが取れず、regex抽出できませんでした",
         };
-        yearlyDebug = { mode: "yearly-direct", rawLen: extractedYearly.raw?.length ?? 0 };
+        yearlyDebug = { mode: "yearly-no-ocr", reason: "no ocr text" };
       }
+
+      // ✅ 追加：品質スコアで「良い方」を採用（同点ならOCR優先）
+      const chosen = chooseBetterYearly({
+        ocrYearly: yearlyReportJsonOcr,
+        directYearly: yearlyReportJsonDirect,
+        prefer: "ocr",
+      });
+
+      yearlyReportJson = chosen.chosen;
+
+      // yearlyReportJsonMeta は「採用された経路」の状態を入れる
+      yearlyReportJsonMeta = {
+        ok: !!yearlyReportJson,
+        error: yearlyReportJson ? null : "yearly抽出に失敗（ocr/directともに不十分）",
+      };
+
+      // Debugに比較情報を追加
+      yearlyDebug = {
+        ...(yearlyDebug ?? {}),
+        compare: {
+          chosenBy: chosen.chosenBy,
+          ocrScore: chosen.ocrScore,
+          directScore: chosen.directScore,
+        },
+        directMeta: yearlyDirectMeta,
+        extractedTestsFinal: yearlyReportJson?.tests?.length ?? 0,
+      };
     }
 
     const trends = extractYearlyTrends(yearlyReportJson as any);
@@ -792,9 +937,16 @@ export async function POST(req: NextRequest) {
         singles: [],
         yearly: yearlyOcrText,
         yearlyError: yearlyOcrError,
+
+        // ✅ 今まで通り返す
         yearlyReportJson,
         yearlyReportJsonMeta,
         yearlyDebug,
+
+        // ✅ 追加：中間生成物も返す（デバッグ用。不要になったら消してOK）
+        yearlyReportJsonOcr,
+        yearlyReportJsonDirect,
+        yearlyReportJsonDirectMeta: yearlyDirectMeta,
       },
       yearlyTrends: trends,
       commentary:
