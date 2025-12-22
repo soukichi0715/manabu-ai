@@ -63,7 +63,7 @@ function extractSection(text: string, startPatterns: RegExp[], endPatterns: RegE
   return section.length ? section : null;
 }
 
-/** ★追加：キーワード出現行の「窓」を作る（見出しが崩れても拾える） */
+/** キーワード出現行の「窓」を作る（見出しが崩れても拾える） */
 function buildKeywordWindows(text: string, patterns: RegExp[], radius = 40, maxWindows = 6) {
   const lines = text.split(/\r?\n/);
   const hitIdx: number[] = [];
@@ -87,8 +87,7 @@ function buildKeywordWindows(text: string, patterns: RegExp[], radius = 40, maxW
 
   const picked = merged.slice(0, maxWindows);
   const chunks = picked.map(
-    (w, k) =>
-      `【WINDOW${k + 1} L${w.s + 1}-L${w.e}】\n` + lines.slice(w.s, w.e).join("\n")
+    (w, k) => `【WINDOW${k + 1} L${w.s + 1}-L${w.e}】\n` + lines.slice(w.s, w.e).join("\n")
   );
 
   return {
@@ -97,7 +96,7 @@ function buildKeywordWindows(text: string, patterns: RegExp[], radius = 40, maxW
   };
 }
 
-/** ★追加：fallback（先頭/中央/末尾） */
+/** fallback（先頭/中央/末尾） */
 function buildFallbackSnippet(text: string, headLines = 260, midLines = 260, tailLines = 260) {
   const lines = text.split(/\r?\n/);
   const total = lines.length;
@@ -108,7 +107,7 @@ function buildFallbackSnippet(text: string, headLines = 260, midLines = 260, tai
   return `${head}\n\n...\n\n${mid}\n\n...\n\n${tail}`.slice(0, 16000);
 }
 
-/** ★追加：テストの重複除去（同じ表を2回拾った時に1つにする） */
+/** テストの重複除去（同じ表を2回拾った時に1つにする） */
 function dedupeTests(tests: any[]) {
   const seen = new Set<string>();
   const out: any[] = [];
@@ -349,28 +348,52 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     endPatterns
   );
 
-  // ★FIX1：年間推移系のブロックも拾う（「育成/公開」が見出し崩れで取れない場合の保険）
+  // ★FIX：年間推移は「1〜4（総合学力診断/順位/偏差値/最近5回/学力推移）」から拾う
   const yearlySection = extractSection(
     extractedText,
-    [/年間/i, /推移/i, /年度/i, /前期/i, /後期/i, /年間成績/i, /年間まとめ/i, /まとめ/i, /総括/i],
+    [
+      /総合学力診断テスト平均/i,
+      /校内順位/i,
+      /^###\s*3\.\s*偏差値/i,
+      /偏差値/i,
+      /最近5回/i,
+      /学力推移/i,
+      /^###\s*1\./i,
+      /^###\s*2\./i,
+      /^###\s*3\./i,
+      /^###\s*4\./i,
+    ],
     endPatterns
   );
 
   const kwPrimary = buildKeywordWindows(
     extractedText,
-    [/育成/i, /公開/i, /模試/i, /偏差/i, /順位/i, /2科/i, /4科/i, /国語/i, /算数/i, /理科/i, /社会/i],
+    [
+      /育成/i,
+      /公開/i,
+      /模試/i,
+      /偏差/i,
+      /順位/i,
+      /2科/i,
+      /4科/i,
+      /国語/i,
+      /算数/i,
+      /数学/i,
+      /理科/i,
+      /社会/i,
+      /総合学力診断/i,
+      /学力推移/i,
+    ],
     45,
     6
   );
 
   const fallbackSnippet = buildFallbackSnippet(extractedText);
 
-  // ★ここが重要：LLMに「このブロックは育成/公開」とラベル付きで渡す
   const snippet =
     [
       ikuseiSection ? `【BLOCK:IKUSEI（育成テスト）】\n${ikuseiSection}` : null,
       kokaiSection ? `【BLOCK:KOKAI（公開模試）】\n${kokaiSection}` : null,
-      // ★FIX1：年間推移ブロックを追加
       yearlySection ? `【BLOCK:YEARLY（年間推移）】\n${yearlySection}` : null,
       kwPrimary.snippet ? `【BLOCK:KEYWORDS（補助）】\n${kwPrimary.snippet}` : null,
     ]
@@ -382,12 +405,10 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     hits: kwPrimary.hits,
     hasIkuseiSection: !!ikuseiSection,
     hasKokaiSection: !!kokaiSection,
-    // ★FIX1：デバッグにも載せる
     hasYearlySection: !!yearlySection,
     snippetPreview: snippet.slice(0, 2000),
   };
 
-  // ★抽出：ブロックがあれば、対応する testType を必ず付けるよう強制
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: [
@@ -395,14 +416,15 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
         role: "system",
         content:
           "あなたは中学受験塾の成績表データ化担当です。" +
-          "OCRテキストから『育成テスト』『公開模試』の成績だけをJSON化します。" +
+          "OCRテキストから『育成テスト』『公開模試』および『年間推移（まとめ）』の成績をJSON化します。" +
           "【最重要】BLOCK:IKUSEI がある場合、tests に testType='ikusei' の要素を1つ作る。" +
           "BLOCK:KOKAI がある場合、tests に testType='kokai_moshi' の要素を1つ作る。" +
-          // ★FIX2：年間推移のブロックがあるときは「年間推移」要素を1つ作る（testType は other でOK）
           "BLOCK:YEARLY がある場合、tests に testType='other' の要素を1つ作る。" +
           "testName はそれぞれ '育成テスト' / '公開模試' / '年間推移' を入れてよい。" +
           "それ以外のテストは作らない（otherは原則作らない。※ただし年間推移は例外）。" +
+          "【表記ゆれ】数学は算数として扱う。" +
           "【超重要】学校の定期テスト（期末/中間/定期/評価/内申/5科/9科/英語/美術/体育/技家）は絶対に抽出しない。" +
+          "ただし、年間推移ブロック内に英語などが混ざっていても、国語/算数/理科/社会と2科/4科に関係する情報だけ抽出し、それ以外は無視する。" +
           "推測は禁止。見えない/不明はnull。空欄はnull。" +
           "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。",
       },
@@ -410,7 +432,7 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
         role: "user",
         content:
           `ファイル名: ${filename}\n\n` +
-          "次のテキストから、受験塾（育成テスト/公開模試）の成績情報を抽出してください。\n" +
+          "次のテキストから、受験塾（育成テスト/公開模試/年間推移）の成績情報を抽出してください。\n" +
           "注意：学校の5科9科、英語、美術、体育などは無視。\n\n" +
           "テキスト:\n" +
           snippet,
@@ -439,7 +461,16 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     return { ...t, testType: tt };
   });
 
-  // ★「other」をできるだけ排除：セクションが取れているなら強制割当
+  // subjects の表記ゆれ補正（数学→算数）
+  for (const t of parsed.tests ?? []) {
+    t.subjects = (t.subjects ?? []).map((s: any) => {
+      const rawName = String(s?.name ?? "").trim();
+      const fixedName = rawName === "数学" ? "算数" : rawName;
+      return { ...s, name: fixedName };
+    });
+  }
+
+  // 「other」をできるだけ排除：セクションが取れているなら強制割当
   const hasI = !!ikuseiSection;
   const hasK = !!kokaiSection;
 
@@ -471,8 +502,7 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     }
   }
 
-  // other は基本捨てる（IKUSEI/KOKAIに寄らなかったもの）
-  // ★FIX3：ただし「年間推移」だけは残す（年間推移表で tests:[] にならないため）
+  // other は基本捨てる。ただし「年間推移」だけは残す
   parsed.tests = parsed.tests.filter((t) => t.testType !== "other" || t.testName === "年間推移");
 
   // 重複削除
@@ -489,7 +519,10 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
   // 値のバリデーション
   for (const t of parsed.tests ?? []) {
     t.subjects = (t.subjects ?? []).map((s) => {
-      const name = (["国語", "算数", "理科", "社会"].includes(s.name) ? s.name : "不明") as any;
+      const nameRaw = String(s?.name ?? "").trim();
+      const normalizedName = nameRaw === "数学" ? "算数" : nameRaw;
+      const name = (["国語", "算数", "理科", "社会"].includes(normalizedName) ? normalizedName : "不明") as any;
+
       return {
         ...s,
         name,
@@ -542,12 +575,14 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return { isGradeReport: false, confidence: 10, reason: "OCR結果がほぼ空でした（判定材料不足）" };
   }
 
-  const hasJukuKeywords = /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試)/.test(snippet);
-  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|理科|社会)/.test(snippet);
+  const hasJukuKeywords = /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試|総合学力診断|偏差値|校内順位|学力推移)/.test(
+    snippet
+  );
+  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|数学|理科|社会)/.test(snippet);
   const strongExamDocSignals = /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
 
   if (hasJukuKeywords && hasScoreSignals) {
-    return { isGradeReport: true, confidence: 98, reason: "育成/公開と成績指標語が確認できたため" };
+    return { isGradeReport: true, confidence: 98, reason: "成績指標語（偏差/順位/得点など）が確認できたため" };
   }
 
   if (strongExamDocSignals && !hasScoreSignals) {
@@ -560,7 +595,8 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
       {
         role: "system",
         content:
-          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。",
+          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。" +
+          "また、年間まとめ（総合学力診断テスト平均/校内順位/偏差値/学力推移）の表も成績表として判定してください。",
       },
       { role: "user", content: `ファイル名: ${filename}\n\nOCRテキスト（抜粋）:\n${snippet}` },
     ],
@@ -750,7 +786,11 @@ export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
-    const singleFiles = fd.getAll("single").filter((v): v is File => v instanceof File);
+    // ★FIX（今回の追加）：FormDataEntryValue に型注釈を付けて "v implicitly any" を消す
+    const singleFiles = fd
+      .getAll("single")
+      .filter((v: FormDataEntryValue): v is File => v instanceof File);
+
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
 
