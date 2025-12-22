@@ -32,8 +32,8 @@ function clampNum(n: any, min: number, max: number): number | null {
 
 function normalizeTestTypeLabel(s: string) {
   const t = String(s ?? "").replace(/\s+/g, "");
-  if (/(育成テスト|学習力育成テスト|育成)/.test(t)) return "ikusei";
-  if (/(公開模試|公開模擬試験|公開|模試)/.test(t)) return "kokai_moshi";
+  if (/(育成テスト|学習力育成テスト|学習力育成|育成)/.test(t)) return "ikusei";
+  if (/(公開模試|公開模擬試験|公開模試成績|公開)/.test(t)) return "kokai_moshi";
   return "other";
 }
 
@@ -114,10 +114,10 @@ function dedupeTests(tests: any[]) {
 
   for (const t of tests ?? []) {
     const subj = Array.isArray(t?.subjects) ? t.subjects : [];
-    // 重要項目だけで指紋（順序差分も吸収）
     const keyObj = {
       testType: t?.testType ?? null,
       testName: t?.testName ?? null,
+      date: t?.date ?? null,
       subjects: subj
         .map((s: any) => ({
           name: s?.name ?? null,
@@ -129,6 +129,7 @@ function dedupeTests(tests: any[]) {
         }))
         .sort((a: any, b: any) => String(a.name).localeCompare(String(b.name))),
       totals: t?.totals ?? null,
+      notes: t?.notes ?? [],
     };
     const fp = JSON.stringify(keyObj);
 
@@ -141,7 +142,9 @@ function dedupeTests(tests: any[]) {
   return out;
 }
 
-/** Supabase Storage 上のPDFをOCR */
+/* =========================
+   OCR (Supabase Storage PDF)
+========================= */
 async function ocrPdfFromStorage(params: { bucket: string; path: string; filename: string }) {
   const { bucket, path, filename } = params;
 
@@ -165,7 +168,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
           { type: "input_file", file_id: uploaded.id },
           {
             type: "input_text",
-            // ★FIX-1：全ページOCR＋省略禁止＋ページ番号
+            // ★重要：この1枚PDFでも「表が途中で落ちる」を防ぐため、全ページ・省略禁止
             text:
               "このPDFはスキャン画像の可能性があります。必ず全ページをOCRし、ページ番号を付けて順番通りに全文を出力してください。要約は禁止。省略禁止。表は行・列が分かる形（可能ならMarkdown表）で転記してください。未記入は「空欄」と明記し、推測で埋めないでください。",
           },
@@ -190,8 +193,8 @@ type JukuReportJson = {
   meta: { sourceFilename: string | null; title: string | null };
   tests: Array<{
     testType: "ikusei" | "kokai_moshi" | "other";
-    testName: string | null;
-    date: string | null;
+    testName: string | null; // 例：育成テスト/公開模試/年間推移/合格力実践テスト など
+    date: string | null; // 例：2025-06-29
     subjects: Array<{
       name: "国語" | "算数" | "理科" | "社会" | "不明";
       score: number | null;
@@ -201,8 +204,24 @@ type JukuReportJson = {
       diffFromAvg: number | null;
     }>;
     totals: {
-      two: { score: number | null; deviation: number | null; rank: number | null; avg: number | null; diffFromAvg: number | null };
-      four: { score: number | null; deviation: number | null; rank: number | null; avg: number | null; diffFromAvg: number | null };
+      two: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+        // ★追加：育成テスト（評価）用
+        grade: number | null;
+      };
+      four: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+        // ★追加：育成テスト（評価）用
+        grade: number | null;
+      };
     };
     notes: string[];
   }>;
@@ -274,8 +293,9 @@ const JUKU_REPORT_JSON_SCHEMA = {
                     rank: { type: ["number", "null"] },
                     avg: { type: ["number", "null"] },
                     diffFromAvg: { type: ["number", "null"] },
+                    grade: { type: ["number", "null"] },
                   },
-                  required: ["score", "deviation", "rank", "avg", "diffFromAvg"],
+                  required: ["score", "deviation", "rank", "avg", "diffFromAvg", "grade"],
                 },
                 four: {
                   type: "object",
@@ -286,8 +306,9 @@ const JUKU_REPORT_JSON_SCHEMA = {
                     rank: { type: ["number", "null"] },
                     avg: { type: ["number", "null"] },
                     diffFromAvg: { type: ["number", "null"] },
+                    grade: { type: ["number", "null"] },
                   },
-                  required: ["score", "deviation", "rank", "avg", "diffFromAvg"],
+                  required: ["score", "deviation", "rank", "avg", "diffFromAvg", "grade"],
                 },
               },
               required: ["two", "four"],
@@ -320,7 +341,7 @@ const JUDGE_JSON_SCHEMA = {
 } as const;
 
 /* =========================
-   Extract report JSON
+   Extract report JSON (LLM)
 ========================= */
 type ExtractResult =
   | { ok: true; reportJson: JukuReportJson; raw: string; error: null; debug: any }
@@ -329,48 +350,50 @@ type ExtractResult =
 async function extractJukuReportJsonFromText(params: { filename: string; extractedText: string }): Promise<ExtractResult> {
   const { filename, extractedText } = params;
 
+  // この簡易推移は「I〜V」で構成されがちなので、それ以外にぶつかったら切る
   const endPatterns: RegExp[] = [
-    /期末|中間|定期|評価|内申|5科|9科|英語|美術|体育|技家/,
+    /期末|中間|定期|評価|内申|5科|9科|英語|美術|保体|技家/,
     /欠席|遅刻|早退|出席率|教科出席率/,
-    /^II\.|^III\.|^IV\.|^V\.|^VI\.|^VII\./,
+    /^VI\.|^VII\./,
     /^＜/,
     /^【/,
   ];
 
+  // ★育成：I（年間平均）＋ III（前期の回別一覧）
   const ikuseiSection = extractSection(
     extractedText,
-    [/育成\s*テスト/i, /学習\s*力\s*育成\s*テスト/i, /学習力\s*育成\s*テスト/i, /育成/i],
+    [
+      /^I\.\s*前年度学習力育成テスト平均/i,
+      /前年度学習力育成テスト平均/i,
+      /^III\.\s*前期学習力育成テスト/i,
+      /前期学習力育成テスト/i,
+      /学習力育成テスト/i,
+    ],
     endPatterns
   );
 
-  // ★FIX-2：公開模試は「V. 公開模試成績」を明示的に拾う（Ⅳ.標準化公開模擬平均の誤爆を防止）
+  // ★公開模試：V（回別一覧）＋ IV（平均）も補助として含める
   const kokaiSection = extractSection(
     extractedText,
     [
       /^V\.\s*公開模試成績/i,
       /公開模試成績/i,
-      /本人の前期平均/i,
-      /本人の後期平均/i,
-      /本人の年間平均/i,
+      /^IV\.\s*前年度公開模擬平均/i,
+      /前年度公開模擬平均/i,
+      /公開模試/i,
+      /公開模擬/i,
+      /前期平均/i,
+      /後期平均/i,
+      /今年度平均/i,
+      /年間平均/i,
     ],
     endPatterns
   );
 
-  // 年間推移は「1〜4（総合学力診断/順位/偏差値/最近5回/学力推移）」から拾う
+  // 年間推移（偏差値推移のグラフ等）が別にある場合
   const yearlySection = extractSection(
     extractedText,
-    [
-      /総合学力診断テスト平均/i,
-      /校内順位/i,
-      /^###\s*3\.\s*偏差値/i,
-      /偏差値/i,
-      /最近5回/i,
-      /学力推移/i,
-      /^###\s*1\./i,
-      /^###\s*2\./i,
-      /^###\s*3\./i,
-      /^###\s*4\./i,
-    ],
+    [/総合学力診断テスト平均/i, /校内順位/i, /偏差値/i, /最近5回/i, /学力推移/i],
     endPatterns
   );
 
@@ -378,25 +401,29 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     extractedText,
     [
       /育成/i,
-      /公開/i,
-      /模試/i,
-      /偏差/i,
-      /順位/i,
-      /2科/i,
+      /学習力育成/i,
+      /公開模試/i,
+      /公開模擬/i,
+      /前期/i,
+      /後期/i,
+      /今年度/i,
+      /年間/i,
+      /回/i,
+      /年/i,
+      /月/i,
+      /日/i,
       /4科/i,
+      /2科/i,
+      /得点/i,
+      /偏差/i,
+      /評価/i,
       /国語/i,
       /算数/i,
       /数学/i,
       /理科/i,
       /社会/i,
-      /総合学力診断/i,
-      /学力推移/i,
-      /公開模試成績/i,
-      /前期平均/i,
-      /後期平均/i,
-      /年間平均/i,
     ],
-    45,
+    55,
     6
   );
 
@@ -428,25 +455,20 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
         role: "system",
         content:
           "あなたは中学受験塾の成績表データ化担当です。" +
-          "OCRテキストから『育成テスト』『公開模試』および『年間推移（まとめ）』の成績をJSON化します。" +
-          "【最重要】BLOCK:IKUSEI がある場合、tests に testType='ikusei' の要素を1つ作る。" +
-          "BLOCK:KOKAI がある場合、tests に testType='kokai_moshi' の要素を1つ作る。" +
-          "BLOCK:YEARLY がある場合、tests に testType='other' の要素を1つ作る。" +
-          "testName はそれぞれ '育成テスト' / '公開模試' / '年間推移' を入れてよい。" +
-          "それ以外のテストは作らない（otherは原則作らない。※ただし年間推移は例外）。" +
+          "OCRテキストから『育成テスト』『公開模試』『簡易推移（回ごとの一覧）』をJSON化します。" +
+          "【最重要】この帳票は“1行＝1回分”の一覧表がある。必ず各行ごとに tests の要素を作ること。" +
+          "【育成テスト】BLOCK:IKUSEI には、(回/年/月/日/4科/2科/得点/評価) が並ぶ表がある。各行から date(YYYY-MM-DD) を作り、totals.four.score と totals.four.grade、totals.two.score と totals.two.grade に入れる。偏差は無ければnull。" +
+          "【公開模試】BLOCK:KOKAI には、(回/年/月/日/4科/2科/得点/偏差) が並ぶ表がある。各行から date(YYYY-MM-DD) を作り、totals.four.score と totals.four.deviation、totals.two.score と totals.two.deviation に入れる。評価は無ければnull。" +
+          "【平均欄】前期平均/後期平均/今年度平均/年間平均があれば notes に文字列で保存する（例：'公開模試4科 前期=.. 後期=.. 年間=.. / 2科 前期=.. 後期=.. 年間=..'）。" +
           "【表記ゆれ】数学は算数として扱う。" +
-          "【超重要】学校の定期テスト（期末/中間/定期/評価/内申/5科/9科/英語/美術/体育/技家）は絶対に抽出しない。" +
-          "ただし、年間推移ブロック内に英語などが混ざっていても、国語/算数/理科/社会と2科/4科に関係する情報だけ抽出し、それ以外は無視する。" +
-          "推測は禁止。見えない/不明はnull。空欄はnull。" +
-          "対象は 国語/算数/理科/社会 と 2科/4科（合計・偏差(偏差値)・順位・平均点・平均との差）。" +
-          "【公開模試】公開模試のブロックに科目別の数値が無く、4科目/2科目の『得点』『偏差』および『本人の前期平均/本人の後期平均/本人の年間平均』しか無い場合は、subjectsは全てnullのままでよい。その代わり totals.four と totals.two に得点・偏差を入れる。前期平均/後期平均/年間平均は notes に文字列で残す。",
+          "【超重要】学校の定期テスト（期末/中間/定期/内申/5科/9科/英語/美術/保体/技家）は抽出しない。" +
+          "推測は禁止。見えない/不明はnull。空欄はnull。",
       },
       {
         role: "user",
         content:
           `ファイル名: ${filename}\n\n` +
-          "次のテキストから、受験塾（育成テスト/公開模試/年間推移）の成績情報を抽出してください。\n" +
-          "注意：学校の5科9科、英語、美術、体育などは無視。\n\n" +
+          "次のテキストから、育成テスト（評価）・公開模試（偏差）の“回ごと”成績を抽出してください。\n\n" +
           "テキスト:\n" +
           snippet,
       },
@@ -483,47 +505,20 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
     });
   }
 
-  // 「other」をできるだけ排除：セクションが取れているなら強制割当
-  const hasI = !!ikuseiSection;
-  const hasK = !!kokaiSection;
-
-  if (parsed.tests.length === 1 && parsed.tests[0].testType === "other") {
-    if (hasI && !hasK) {
-      parsed.tests[0].testType = "ikusei" as any;
-      if (!parsed.tests[0].testName) parsed.tests[0].testName = "育成テスト";
-    } else if (hasK && !hasI) {
-      parsed.tests[0].testType = "kokai_moshi" as any;
-      if (!parsed.tests[0].testName) parsed.tests[0].testName = "公開模試";
-    }
-  }
-
-  // 2件あって両方otherなら、IKUSEI/KOKAIの順に割り当て（存在してる場合）
-  if (parsed.tests.length >= 2) {
-    const allOther = parsed.tests.every((t) => t.testType === "other");
-    if (allOther && (hasI || hasK)) {
-      if (hasI) {
-        parsed.tests[0].testType = "ikusei" as any;
-        if (!parsed.tests[0].testName) parsed.tests[0].testName = "育成テスト";
-      }
-      if (hasK) {
-        const idx = hasI ? 1 : 0;
-        if (parsed.tests[idx]) {
-          parsed.tests[idx].testType = "kokai_moshi" as any;
-          if (!parsed.tests[idx].testName) parsed.tests[idx].testName = "公開模試";
-        }
-      }
-    }
-  }
-
-  // other は基本捨てる。ただし「年間推移」だけは残す
-  parsed.tests = parsed.tests.filter((t) => t.testType !== "other" || t.testName === "年間推移");
+  // other は基本捨てる。ただし「年間推移」だけは残す（入ってきた場合）
+  parsed.tests = (parsed.tests ?? []).filter((t) => t.testType !== "other" || t.testName === "年間推移");
 
   // 重複削除
   parsed.tests = dedupeTests(parsed.tests);
 
-  // 並び順
+  // 並び順：育成→公開→その他
   const order: Record<string, number> = { ikusei: 0, kokai_moshi: 1, other: 9 };
-  parsed.tests.sort((a: any, b: any) => (order[a.testType] ?? 9) - (order[b.testType] ?? 9));
+  parsed.tests.sort((a: any, b: any) => {
+    const oa = order[a.testType] ?? 9;
+    const ob = order[b.testType] ?? 9;
+    if (oa !== ob) return oa - ob;
+    return String(a.date ?? "").localeCompare(String(b.date ?? ""));
+  });
 
   // meta補正
   parsed.meta = parsed.meta ?? { sourceFilename: filename, title: null };
@@ -547,8 +542,22 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
       };
     });
 
-    const two = t.totals?.two ?? { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null };
-    const four = t.totals?.four ?? { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null };
+    const two = t.totals?.two ?? {
+      score: null,
+      deviation: null,
+      rank: null,
+      avg: null,
+      diffFromAvg: null,
+      grade: null,
+    };
+    const four = t.totals?.four ?? {
+      score: null,
+      deviation: null,
+      rank: null,
+      avg: null,
+      diffFromAvg: null,
+      grade: null,
+    };
 
     t.totals.two = {
       score: clampNum(two.score, 0, 400),
@@ -556,6 +565,7 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
       rank: clampNum(two.rank, 1, 50000),
       avg: clampNum(two.avg, 0, 400),
       diffFromAvg: clampNum(two.diffFromAvg, -400, 400),
+      grade: clampNum(two.grade, 0, 5), // 評価は多くの場合 1〜5 か 1〜4 なので広めに
     };
 
     t.totals.four = {
@@ -564,6 +574,7 @@ async function extractJukuReportJsonFromText(params: { filename: string; extract
       rank: clampNum(four.rank, 1, 50000),
       avg: clampNum(four.avg, 0, 500),
       diffFromAvg: clampNum(four.diffFromAvg, -500, 500),
+      grade: clampNum(four.grade, 0, 5),
     };
 
     t.notes = Array.isArray(t.notes) ? t.notes : [];
@@ -588,51 +599,32 @@ async function judgeGradeReport(params: { filename: string; extractedText: strin
     return { isGradeReport: false, confidence: 10, reason: "OCR結果がほぼ空でした（判定材料不足）" };
   }
 
-  const hasJukuKeywords = /(育成テスト|学習力育成テスト|公開模試|公開模擬試験|育成|公開|模試|総合学力診断|偏差値|校内順位|学力推移)/.test(
-    snippet
-  );
-  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|平均との差|得点|点数|2科|4科|国語|算数|数学|理科|社会)/.test(snippet);
-  const strongExamDocSignals = /(問題用紙|解答用紙|解答欄|設問|大問|小問|配点|注意事項|試験問題|問題冊子)/.test(snippet);
+  // ★この帳票は “育成/公開模試/学力診断/合格力” の単語が出る
+  const mustHaveJukuSignal =
+    /(学習力育成テスト|育成テスト|公開模試成績|公開模試|公開模擬|新学力観学力診断|学力診断|合格力実践テスト|合格力育成テスト)/.test(
+      snippet
+    );
 
-  if (hasJukuKeywords && hasScoreSignals) {
-    return { isGradeReport: true, confidence: 98, reason: "成績指標語（偏差/順位/得点など）が確認できたため" };
-  }
-
-  if (strongExamDocSignals && !hasScoreSignals) {
-    return { isGradeReport: false, confidence: 90, reason: "試験資料の特徴が強く、成績指標語が弱いため" };
-  }
-
-  const resp = await openai.responses.create({
-    model: "gpt-4o-mini",
-    input: [
-      {
-        role: "system",
-        content:
-          "あなたは受験塾の成績表判定担当です。『学習相談』のように本文に「問題/解答/配点」が混ざる場合でも、育成テスト/公開模試/偏差/順位/平均/得点/2科4科 が揃っていれば成績表として判定してください。" +
-          "また、年間まとめ（総合学力診断テスト平均/校内順位/偏差値/学力推移）の表も成績表として判定してください。",
-      },
-      { role: "user", content: `ファイル名: ${filename}\n\nOCRテキスト（抜粋）:\n${snippet}` },
-    ],
-    text: {
-      format: { type: "json_schema", name: JUDGE_JSON_SCHEMA.name, strict: true, schema: JUDGE_JSON_SCHEMA.schema },
-    },
-  });
-
-  const txt = (resp.output_text ?? "").trim();
-  try {
-    const obj = JSON.parse(txt);
+  if (!mustHaveJukuSignal) {
     return {
-      isGradeReport: Boolean(obj.isGradeReport),
-      confidence: Number.isFinite(obj.confidence) ? Math.max(0, Math.min(100, Number(obj.confidence))) : 50,
-      reason: typeof obj.reason === "string" ? obj.reason : "理由の取得に失敗しました",
+      isGradeReport: false,
+      confidence: 95,
+      reason: "塾成績表に必須の見出し（育成/公開模試/学力診断/合格力等）が見当たらないため",
     };
-  } catch {
-    return { isGradeReport: false, confidence: 30, reason: "判定JSONの解析に失敗（フォーマット不正）" };
   }
+
+  const hasScoreSignals = /(偏差(値)?|順位|平均(点)?|得点|点数|2科|4科|評価)/.test(snippet);
+
+  if (mustHaveJukuSignal && hasScoreSignals) {
+    return { isGradeReport: true, confidence: 98, reason: "塾成績表の見出し＋得点/偏差/評価の記載が確認できたため" };
+  }
+
+  // ここまで来たら“ほぼ成績表”扱い
+  return { isGradeReport: true, confidence: 80, reason: "塾成績表の見出しは確認できたが数値指標が弱いため" };
 }
 
 /* =========================
-   Analysis
+   Analysis (そのまま)
 ========================= */
 type SubjectAgg = {
   name: string;
@@ -710,7 +702,7 @@ function analyzeYearlyReportJson(yearly: any) {
 }
 
 /* =========================
-   Commentary
+   Commentary (そのまま)
 ========================= */
 type Tone = "gentle" | "balanced" | "strict";
 type Target = "student" | "parent" | "teacher";
@@ -799,7 +791,6 @@ export async function POST(req: NextRequest) {
   try {
     const fd = await req.formData();
 
-    // FormDataEntryValue に型注釈を付けて "v implicitly any" を消す
     const singleFiles = fd
       .getAll("single")
       .filter((v: FormDataEntryValue): v is File => v instanceof File);
