@@ -336,7 +336,7 @@ async function ocrPdfFromStorage(params: {
       : "";
 
     const resp = await openai.responses.create({
-      model: "gpt-4.1-mini",
+      model: leadingModelName(),
       input: [
         {
           role: "user",
@@ -395,6 +395,7 @@ function buildYearlyFromOcrTextByFormat(
 
   const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
 
+  // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 | ・・・（右に列が続いてもOK）
   const ikuseiRowRe =
     /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|[^\r\n]*(?:\r?\n|$)/g;
 
@@ -404,9 +405,14 @@ function buildYearlyFromOcrTextByFormat(
     if (!date) continue;
 
     const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
-    const fourGrade = clampNum(toNumberOrNull(m[4]), 0, 10);
+
+    // ✅修正：育成の評価は 3〜10 のみ
+    const fourGrade = clampNum(toNumberOrNull(m[4]), 3, 10);
+
     const twoScore = clampNum(toNumberOrNull(m[5]), 0, 400);
-    const twoGrade = clampNum(toNumberOrNull(m[6]), 0, 10);
+
+    // ✅修正：育成の評価は 3〜10 のみ
+    const twoGrade = clampNum(toNumberOrNull(m[6]), 3, 10);
 
     const t: any = {
       testType: "ikusei",
@@ -433,8 +439,7 @@ function buildYearlyFromOcrTextByFormat(
       ? [/(V|Ⅴ)\s*[\.．]\s*公開模試成績/i, /公開模試成績/i]
       : [/Public模試成績/i, /公開模試成績/i, /(V|Ⅴ)\s*[\.．]\s*公開模試成績/i];
 
-  // ✅ ここが今回の本丸：/---$/m を入れると、OCRの区切り線で表の前で切れてしまう
-  //    → OCRテキストに " --- " が混ざっても表まで残るように ends を安全にする
+  // ✅ /---$/m で区切り線に誤爆して表の前で切れるのを避ける
   const kokaiEnds = [
     /春期/i,
     /夏期/i,
@@ -447,9 +452,11 @@ function buildYearlyFromOcrTextByFormat(
 
   const kokaiBlock = sliceBetweenAny(ocrText, kokaiStarts, kokaiEnds);
 
+  // 分割日付版（| 回 | 年 | 月 | 日 | 4科得点 | 偏差 | 2科得点 | 偏差 |）
   const kokaiRowReSplit =
     /\|\s*(\d{1,2})\s*\|\s*(20\d{2})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
 
+  // 単一セル日付版（| 回 | 日付 | 4科得点 | 偏差 | 2科得点 | 偏差 |）
   const kokaiRowRe =
     /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
 
@@ -526,6 +533,7 @@ function buildYearlyFromOcrTextByFormat(
     }
   }
 
+  // 念のため：育成/公開のみ + 学判除外
   yearly.tests = yearly.tests
     .map((t: any) => {
       const nm = String(t?.testName ?? "");
@@ -667,8 +675,15 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       t.totals.four.score = clampNum(t.totals.four.score, 0, 500);
       t.totals.two.deviation = clampNum(t.totals.two.deviation, 10, 90);
       t.totals.four.deviation = clampNum(t.totals.four.deviation, 10, 90);
-      t.totals.two.grade = clampNum(t.totals.two.grade, 0, 10);
-      t.totals.four.grade = clampNum(t.totals.four.grade, 0, 10);
+
+      // ✅ 修正：育成の評価だけ 3〜10
+      if (t.testType === "ikusei") {
+        t.totals.two.grade = clampNum(t.totals.two.grade, 3, 10);
+        t.totals.four.grade = clampNum(t.totals.four.grade, 3, 10);
+      } else {
+        t.totals.two.grade = clampNum(t.totals.two.grade, 0, 10);
+        t.totals.four.grade = clampNum(t.totals.four.grade, 0, 10);
+      }
 
       nullifyFieldsByType(t);
       forceNullifyFourIfMissing(t);
@@ -710,11 +725,13 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
 
   const tests = yearly.tests ?? [];
 
+  // 育成：評価（2科評価を優先）
   const ikuseiVals: number[] = tests
     .filter((t) => t.testType === "ikusei")
     .map((t: any) => (typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null))
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
+  // 公開：偏差（4科偏差優先、無ければ2科）
   const kokaiVals: number[] = tests
     .filter((t) => t.testType === "kokai_moshi")
     .map((t: any) =>
@@ -875,4 +892,3 @@ export async function POST(req: NextRequest) {
     return new NextResponse(e?.message ?? "Server error", { status: 500 });
   }
 }
-
