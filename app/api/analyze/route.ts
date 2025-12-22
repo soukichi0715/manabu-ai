@@ -421,10 +421,10 @@ function buildYearlyFromOcrTextByFormat(
 
   const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
 
-  // ✅ 2科の得点/評価が "-" でも拾う
+  // ✅ 修正：2科の得点/評価が「空欄」でも拾えるようにする
   // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 | ...
   const ikuseiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|[^\r\n]*(?:\r?\n|$)/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|\s*([^|]*)\|\s*([^|]*)\|[^\r\n]*(?:\r?\n|$)/g;
 
   for (const m of ikuseiBlock.matchAll(ikuseiRowRe)) {
     const n = Number(m[1]);
