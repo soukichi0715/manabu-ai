@@ -32,8 +32,8 @@ function clampNum(n: any, min: number, max: number): number | null {
 
 function normalizeTestTypeLabel(s: string) {
   const t = String(s ?? "").replace(/\s+/g, "");
-  if (/(育成テスト|学習力育成テスト|学習力育成|育成)/.test(t)) return "ikusei";
-  if (/(公開模試|公開模擬試験|公開模試成績|公開模試試験成績|公開)/.test(t)) return "kokai_moshi";
+  if (/(学習力育成テスト|育成テスト|学習力育成|育成)/.test(t)) return "ikusei";
+  if (/(公開模試|公開模擬試験|公開模試成績|公開)/.test(t)) return "kokai_moshi";
   return "other";
 }
 
@@ -43,6 +43,19 @@ function safeParseJson<T>(text: string): T | null {
   } catch {
     return null;
   }
+}
+
+function isoDateOrNull(y: any, m: any, d: any): string | null {
+  const yy = Number(y);
+  const mm = Number(m);
+  const dd = Number(d);
+  if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
+  if (yy < 2000 || yy > 2100) return null;
+  if (mm < 1 || mm > 12) return null;
+  if (dd < 1 || dd > 31) return null;
+  return `${yy.toString().padStart(4, "0")}-${mm.toString().padStart(2, "0")}-${dd
+    .toString()
+    .padStart(2, "0")}`;
 }
 
 /** テストの重複除去 */
@@ -79,22 +92,9 @@ function dedupeTests(tests: any[]) {
   return out;
 }
 
-function isoDateOrNull(y: any, m: any, d: any): string | null {
-  const yy = Number(y);
-  const mm = Number(m);
-  const dd = Number(d);
-  if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
-  if (yy < 2000 || yy > 2100) return null;
-  if (mm < 1 || mm > 12) return null;
-  if (dd < 1 || dd > 31) return null;
-  const s = `${yy.toString().padStart(4, "0")}-${mm.toString().padStart(2, "0")}-${dd
-    .toString()
-    .padStart(2, "0")}`;
-  return s;
-}
-
 /* =========================
-   OCR (text)  ※単発用の保険として残す
+   OCR（参考用：デバッグ/確認）
+   ※年間はdirect抽出が本命。OCRテキストは信用しない。
 ========================= */
 async function ocrPdfFromStorage(params: { bucket: string; path: string; filename: string }) {
   const { bucket, path, filename } = params;
@@ -120,7 +120,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
           {
             type: "input_text",
             text:
-              "このPDFはスキャン画像の可能性があります。必ず全ページをOCRし、ページ番号を付けて順番通りに全文出力してください。要約は禁止。省略禁止。表略・抜粋・個人情報保護のため省略、などの自己判断による省略は絶対にしないでください。推測で埋めないでください。出力はOCR転記のみ（解釈・編集なし）。",
+              "必ず全ページをOCRし、ページ番号を付けて順番通りに全文転記してください。要約禁止。省略禁止。表略禁止。推測で埋めない。出力はOCR転記のみ。",
           },
         ],
       },
@@ -135,7 +135,7 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
 }
 
 /* =========================
-   Direct extraction from PDF (yearly優先 / 幻覚対策)
+   Schema (juku_report)
 ========================= */
 type JukuReportJson = {
   docType: "juku_report";
@@ -154,8 +154,22 @@ type JukuReportJson = {
       diffFromAvg: number | null;
     }>;
     totals: {
-      two: { score: number | null; deviation: number | null; rank: number | null; avg: number | null; diffFromAvg: number | null; grade: number | null };
-      four: { score: number | null; deviation: number | null; rank: number | null; avg: number | null; diffFromAvg: number | null; grade: number | null };
+      two: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+        grade: number | null; // 育成の「評価」をここに入れる
+      };
+      four: {
+        score: number | null;
+        deviation: number | null;
+        rank: number | null;
+        avg: number | null;
+        diffFromAvg: number | null;
+        grade: number | null; // 育成の「評価」をここに入れる
+      };
     };
     notes: string[];
   }>;
@@ -251,6 +265,28 @@ const JUKU_REPORT_JSON_SCHEMA = {
   strict: true,
 } as const;
 
+/* =========================
+   Grade fallback (育成の評価の救済)
+========================= */
+function pickGradeFallback(t: any): number | null {
+  // 0〜5だけ「評価」とみなす（推測で変換はしない）
+  const cands = [
+    t?.totals?.two?.grade,
+    t?.totals?.four?.grade,
+    t?.totals?.two?.deviation,
+    t?.totals?.four?.deviation,
+    t?.totals?.two?.rank,
+    t?.totals?.four?.rank,
+  ];
+  for (const v of cands) {
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 5) return v;
+  }
+  return null;
+}
+
+/* =========================
+   Direct extraction from PDF (本命)
+========================= */
 async function extractJukuReportJsonDirectFromPdf(params: {
   bucket: string;
   path: string;
@@ -273,43 +309,30 @@ async function extractJukuReportJsonDirectFromPdf(params: {
   const system =
     mode === "yearly"
       ? `
-あなたは「日能研などの塾の成績推移表」をPDF画像から正確に読み取って、JSON化する担当です。
+あなたは「塾の成績推移表（日能研など）」をPDF画像から正確に読み取り、JSON化する担当です。
 
-【このPDFで必ず探す表（重要）】
-- I. 前年度学習力育成テスト平均（年間）
-- III. 前期学習力育成テスト（回ごとの得点・評価）
-- IV. 前年度公開模試平均
-- V. 公開模試試験成績（回ごとの得点・偏差）
-- 合格力実践テスト / 合格力育成テスト（下部に表がある場合）
+【このPDFで必ず探す（重要）】
+- 学習力育成テスト：回ごとの「得点」「評価」
+- 公開模試：回ごとの「得点」「偏差」
+- 合格力実践テスト/合格力育成テスト：同様に回ごとに表があれば抽出
 
-【抽出ルール（最重要）】
+【抽出ルール】
 - “回ごとの表”は 1行=1回 → tests[] を必ず行数分作る
-- 育成（学習力育成テスト）は「得点」「評価」を取り、totals.two/four の score と grade に入れる（偏差は null）
-- 公開模試は「得点」「偏差」を取り、totals.two/four の score と deviation に入れる（grade は null）
-- 年/月/日 がある行は date=YYYY-MM-DD にする（無ければ null）
-- 国語/算数/社会/理科 も列があれば subjects に入れる（無ければ全て null でOK）
-- “見えない/空欄”は null（絶対に推測で埋めない）
-- PDFに存在しない表を作らない（幻覚禁止）
-
-【禁止事項】
-- 期末テスト点数分布、提出物状況、観点別評価など「このPDFに無い」項目を捏造しない
-- 別帳票を混ぜない
-
-出力は JSONスキーマ厳守。
+- 育成（学習力育成テスト）：評価は totals.two.grade または totals.four.grade に入れる（得点はscore）
+- 公開模試：偏差は totals.two.deviation / totals.four.deviation に入れる（得点はscore）
+- 教科列（国/算/理/社）があるなら subjects[] にも入れる（無いなら nullでOK）
+- 見えない/空欄は null。推測禁止。
+- PDFに存在しない表・項目を作らない（幻覚禁止）
 `.trim()
       : `
-あなたは「単発のテスト結果（1回分の成績表）」をPDF画像から正確に読み取りJSON化する担当です。
-育成テスト/公開模試/合格力実践テスト等が1回分載っている場合、それを tests[] に入れる。
-見えない値は null。推測禁止。幻覚禁止。JSONスキーマ厳守。
+あなたは「単発（1回分）の塾テスト成績表」をPDF画像から正確に読み取り、JSON化する担当です。
+育成/公開模試などが1回分載っている場合、それを tests[] に入れる。推測禁止。幻覚禁止。
 `.trim();
 
   const resp = await openai.responses.create({
     model: "gpt-4.1",
     input: [
-      {
-        role: "system",
-        content: system,
-      },
+      { role: "system", content: system },
       {
         role: "user",
         content: [
@@ -318,7 +341,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
             type: "input_text",
             text:
               `ファイル名: ${filename}\n` +
-              "上のPDFから、塾の成績推移（育成=得点+評価 / 公開=得点+偏差）をJSON化してください。推測は禁止。空欄はnull。",
+              "このPDFから『育成=得点+評価』『公開=得点+偏差』の回ごとの推移をJSON化してください。推測は禁止。空欄はnull。",
           },
         ],
       },
@@ -344,22 +367,46 @@ async function extractJukuReportJsonDirectFromPdf(params: {
     return { ok: false, reportJson: null, raw: out, error: "JSONの解析に失敗（フォーマット不正）" };
   }
 
-  // 後処理：type補正・表記ゆれ補正・範囲チェック
+  // ===== 修正①：testName優先で testType を確定（other対策） =====
   parsed.tests = (parsed.tests ?? []).map((t) => {
-    const tt = normalizeTestTypeLabel(t.testType || t.testName || "other") as any;
+    const tt = normalizeTestTypeLabel(t.testName || t.testType || "other") as any;
     return { ...t, testType: tt };
   });
 
+  // 後処理：範囲チェック等
   for (const t of parsed.tests ?? []) {
+    // subjects name補正
     t.subjects = (t.subjects ?? []).map((s: any) => {
       const rawName = String(s?.name ?? "").trim();
-      const fixedName = rawName === "数学" ? "算数" : rawName;
-      return { ...s, name: fixedName };
+      const fixed = rawName === "数学" ? "算数" : rawName;
+      const name = (["国語", "算数", "理科", "社会"].includes(fixed) ? fixed : "不明") as any;
+      return {
+        ...s,
+        name,
+        score: clampNum(s.score, 0, 200),
+        deviation: clampNum(s.deviation, 10, 90),
+        rank: clampNum(s.rank, 1, 50000),
+        avg: clampNum(s.avg, 0, 200),
+        diffFromAvg: clampNum(s.diffFromAvg, -200, 200),
+      };
     });
 
-    // totals クリーニング
-    const two = t.totals?.two ?? { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null, grade: null };
-    const four = t.totals?.four ?? { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null, grade: null };
+    const two = t.totals?.two ?? {
+      score: null,
+      deviation: null,
+      rank: null,
+      avg: null,
+      diffFromAvg: null,
+      grade: null,
+    };
+    const four = t.totals?.four ?? {
+      score: null,
+      deviation: null,
+      rank: null,
+      avg: null,
+      diffFromAvg: null,
+      grade: null,
+    };
 
     t.totals.two = {
       score: clampNum(two.score, 0, 400),
@@ -378,24 +425,14 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       grade: clampNum(four.grade, 0, 5),
     };
 
-    // subjects クリーニング
-    t.subjects = (t.subjects ?? []).map((s: any) => {
-      const nameRaw = String(s?.name ?? "").trim();
-      const normalizedName = nameRaw === "数学" ? "算数" : nameRaw;
-      const name = (["国語", "算数", "理科", "社会"].includes(normalizedName) ? normalizedName : "不明") as any;
+    // ===== 修正②：育成テストだけ grade を救済（0〜5がどこかに紛れた場合） =====
+    if (t.testType === "ikusei") {
+      const g = pickGradeFallback(t);
+      if (t.totals.two.grade == null) t.totals.two.grade = g;
+      if (t.totals.four.grade == null) t.totals.four.grade = g;
+    }
 
-      return {
-        ...s,
-        name,
-        score: clampNum(s.score, 0, 200),
-        deviation: clampNum(s.deviation, 10, 90),
-        rank: clampNum(s.rank, 1, 50000),
-        avg: clampNum(s.avg, 0, 200),
-        diffFromAvg: clampNum(s.diffFromAvg, -200, 200),
-      };
-    });
-
-    // date整形（年/月/日をそのまま入れてくるモデル対策）
+    // date整形
     if (t.date && /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(t.date)) {
       const [y, m, d] = t.date.split(/[-/]/);
       t.date = isoDateOrNull(y, m, d);
@@ -412,7 +449,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
     const oa = order[a.testType] ?? 9;
     const ob = order[b.testType] ?? 9;
     if (oa !== ob) return oa - ob;
-    return String(a.date ?? "").localeCompare(String(b.date ?? ""));
+    return String(a.testName ?? "").localeCompare(String(b.testName ?? ""));
   });
 
   parsed.meta = parsed.meta ?? { sourceFilename: filename, title: null };
@@ -423,7 +460,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 }
 
 /* =========================
-   Analysis (既存のまま)
+   Analysis
 ========================= */
 type SubjectAgg = {
   name: string;
@@ -449,6 +486,8 @@ function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
   if (!juku) return [];
   const rows: Array<{ name: string; deviation: number | null }> = [];
   for (const t of juku.tests ?? []) {
+    // 公開模試だけ偏差を分析に使う（育成は偏差なし想定）
+    if (t.testType !== "kokai_moshi") continue;
     for (const s of t.subjects ?? []) {
       const nm = String(s?.name ?? "").trim();
       if (!nm) continue;
@@ -456,27 +495,6 @@ function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
     }
   }
   return rows;
-}
-
-function analyzeSinglesReportJson(singles: Array<{ reportJson?: any; filename?: string }>) {
-  const map = new Map<string, SubjectAgg>();
-  for (const s of singles) {
-    const r = s.reportJson;
-    if (!r || !Array.isArray(r.subjects)) continue;
-    for (const subj of r.subjects) {
-      const name = String(subj?.name ?? "").trim();
-      if (!name) continue;
-      const dev = safeNum(subj?.deviation);
-      const cur =
-        map.get(name) ??
-        ({ name, count: 0, avgDeviation: null, lastDeviation: null, minDeviation: null } as SubjectAgg);
-      map.set(name, mergeAgg(cur, dev));
-    }
-  }
-  const subjects = Array.from(map.values());
-  subjects.sort((a, b) => (a.avgDeviation ?? 9999) - (b.avgDeviation ?? 9999));
-  const weakest = subjects[0]?.avgDeviation != null ? subjects[0] : null;
-  return { subjects, weakest };
 }
 
 function analyzeYearlyReportJson(yearly: any) {
@@ -501,89 +519,6 @@ function analyzeYearlyReportJson(yearly: any) {
 }
 
 /* =========================
-   Commentary (既存のまま)
-========================= */
-type Tone = "gentle" | "balanced" | "strict";
-type Target = "student" | "parent" | "teacher";
-type FocusAxis = "mistake" | "process" | "knowledge" | "attitude";
-
-function toneLabel(t: Tone) {
-  if (t === "gentle") return "優しめ（共感多め）";
-  if (t === "strict") return "厳しめ（改善点を明確に）";
-  return "バランス（優しさ7：厳しさ3）";
-}
-function targetLabel(t: Target) {
-  if (t === "parent") return "保護者向け";
-  if (t === "teacher") return "講師/社内向け";
-  return "子ども向け";
-}
-function focusLabel(f: FocusAxis) {
-  switch (f) {
-    case "mistake":
-      return "ミス分析";
-    case "process":
-      return "思考プロセス";
-    case "knowledge":
-      return "知識/定着";
-    case "attitude":
-      return "姿勢/習慣";
-    default:
-      return f;
-  }
-}
-
-async function generateCommentary(params: {
-  tone: Tone;
-  target: Target;
-  focus: FocusAxis[];
-  singleAnalysis: any;
-  yearlyAnalysis: any;
-  singlesReportJson: Array<{ name: string; reportJson: any | null }>;
-  yearlyReportJson: any | null;
-}) {
-  const { tone, target, focus, singleAnalysis, yearlyAnalysis, singlesReportJson, yearlyReportJson } = params;
-
-  const payload = {
-    settings: {
-      tone,
-      toneLabel: toneLabel(tone),
-      target,
-      targetLabel: targetLabel(target),
-      focus: focus.map((x) => ({ key: x, label: focusLabel(x) })),
-    },
-    analysis: { singles: singleAnalysis, yearly: yearlyAnalysis },
-    singles: singlesReportJson.map((x) => ({ name: x.name, reportJson: x.reportJson })),
-    yearly: yearlyReportJson,
-  };
-
-  const system = `
-あなたは中学受験算数のプロ講師「まなぶ先生AI」です。
-・ミスは責めず「次に伸びるヒント」にする
-・優しさ7：厳しさ3
-・tone/target/focusを反映
-・根拠のない断定は禁止（nullは未取得とする）
-  `.trim();
-
-  const user = `
-以下は受験塾の成績表JSON（育成テスト/公開模試）と集計結果です。
-このデータを元に講評を書いてください。
-
-【データ(JSON)】
-${JSON.stringify(payload, null, 2)}
-`.trim();
-
-  const resp = await openai.responses.create({
-    model: "gpt-4.1-mini",
-    input: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  });
-
-  return typeof resp.output_text === "string" ? resp.output_text.trim() : "";
-}
-
-/* =========================
    Handler
 ========================= */
 export async function POST(req: NextRequest) {
@@ -596,17 +531,6 @@ export async function POST(req: NextRequest) {
 
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
-
-    const tone = (fd.get("tone")?.toString() ?? "gentle") as Tone;
-    const target = (fd.get("target")?.toString() ?? "student") as Target;
-
-    let focus: FocusAxis[] = [];
-    try {
-      focus = JSON.parse(fd.get("focus")?.toString() ?? "[]");
-      if (!Array.isArray(focus)) focus = [];
-    } catch {
-      focus = [];
-    }
 
     if (singleFiles.length === 0 && !yearlyFile) {
       return new NextResponse("PDFがありません。", { status: 400 });
@@ -630,44 +554,10 @@ export async function POST(req: NextRequest) {
     for (const f of singleFiles) uploadedSingles.push(await upload(f));
     const uploadedYearly = yearlyFile ? await upload(yearlyFile) : null;
 
-    const MAX_SINGLE_OCR = 5;
-    const singleTargets = uploadedSingles.slice(0, MAX_SINGLE_OCR);
-
-    // -------- singles（単発）：今は従来通り OCR→抽出（必要なら後でdirectに統一可能） --------
+    // singles（単発）は今回は未使用でもOK：メインは単発で分析したいなら、後でここを作りこむ
     const singleOcrResults: any[] = [];
-    for (const f of singleTargets) {
-      try {
-        const text = await ocrPdfFromStorage({ bucket, path: f.path, filename: f.name });
 
-        // 単発は direct 抽出を優先（幻覚対策）
-        const extracted = await extractJukuReportJsonDirectFromPdf({
-          bucket,
-          path: f.path,
-          filename: f.name,
-          mode: "single",
-        });
-
-        singleOcrResults.push({
-          ...f,
-          ok: true,
-          text,
-          gradeCheck: { isGradeReport: true, confidence: 80, reason: "単発はdirect抽出で処理", reportKind: "juku" },
-          reportJson: extracted.reportJson,
-          reportJsonMeta: { ok: extracted.ok, error: extracted.ok ? null : extracted.error ?? "JSON化に失敗" },
-          debug: { mode: "single-direct", rawLen: extracted.raw?.length ?? 0 },
-        });
-      } catch (e: any) {
-        console.error("[single OCR/direct error]", f?.name, e);
-        singleOcrResults.push({
-          ...f,
-          ok: false,
-          error: e?.message ?? "single error",
-          gradeCheck: { isGradeReport: false, confidence: 0, reason: "処理に失敗したため判定できません", reportKind: "juku" },
-        });
-      }
-    }
-
-    // -------- yearly（年間）：OCR全文は参考で返すが、抽出は direct を必ず使う --------
+    // yearly（年間）：direct抽出が本命
     let yearlyOcrText: string | null = null;
     let yearlyOcrError: string | null = null;
 
@@ -678,7 +568,11 @@ export async function POST(req: NextRequest) {
     if (uploadedYearly) {
       // 参考用OCR（失敗しても致命傷にしない）
       try {
-        yearlyOcrText = await ocrPdfFromStorage({ bucket, path: uploadedYearly.path, filename: uploadedYearly.name });
+        yearlyOcrText = await ocrPdfFromStorage({
+          bucket,
+          path: uploadedYearly.path,
+          filename: uploadedYearly.name,
+        });
       } catch (e: any) {
         yearlyOcrText = null;
         yearlyOcrError = e?.message ?? "yearly OCR error";
@@ -694,40 +588,14 @@ export async function POST(req: NextRequest) {
       });
 
       yearlyReportJson = extractedYearly.reportJson;
-      yearlyReportJsonMeta = { ok: extractedYearly.ok, error: extractedYearly.ok ? null : extractedYearly.error ?? "JSON化に失敗" };
+      yearlyReportJsonMeta = {
+        ok: extractedYearly.ok,
+        error: extractedYearly.ok ? null : extractedYearly.error ?? "JSON化に失敗",
+      };
       yearlyDebug = { mode: "yearly-direct", rawLen: extractedYearly.raw?.length ?? 0 };
     }
 
-    const singleJsonItems = (singleOcrResults ?? []).map((x: any) => {
-      const r = x.reportJson;
-      if (r && r.docType === "juku_report") {
-        const rows = flattenJukuReportToSubjectsForAnalysis(r as JukuReportJson);
-        return { filename: x.name, reportJson: { subjects: rows.map((row) => ({ name: row.name, deviation: row.deviation })) } };
-      }
-      return { filename: x.name, reportJson: x.reportJson };
-    });
-
-    const singleAnalysis = analyzeSinglesReportJson(singleJsonItems);
     const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
-
-    const singlesReportJson = (singleOcrResults ?? []).map((x: any) => ({
-      name: x.name,
-      reportJson: x.reportJson as any | null,
-    }));
-
-    const hasAnyReportJson = singlesReportJson.some((x) => !!x.reportJson) || !!yearlyReportJson;
-
-    const commentary = hasAnyReportJson
-      ? await generateCommentary({
-          tone,
-          target,
-          focus,
-          singleAnalysis,
-          yearlyAnalysis,
-          singlesReportJson,
-          yearlyReportJson,
-        })
-      : "成績表として読み取れたデータがまだありません。成績表PDFを入れてもう一度試してみてください。";
 
     return NextResponse.json({
       summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
@@ -739,11 +607,16 @@ export async function POST(req: NextRequest) {
         yearlyReportJson,
         yearlyReportJsonMeta,
         yearlyDebug,
-        note: uploadedSingles.length > MAX_SINGLE_OCR ? `単発PDFが多いため、先頭${MAX_SINGLE_OCR}枚のみ処理しました` : null,
+        note: null,
       },
-      selections: { tone, focus, target },
-      analysis: { singles: singleAnalysis, yearly: yearlyAnalysis },
-      commentary,
+      analysis: {
+        singles: { subjects: [], weakest: null },
+        yearly: yearlyAnalysis,
+      },
+      commentary:
+        uploadedSingles.length === 0
+          ? "単発PDFが未投入です。メイン分析は単発（育成/公開の1回分）を入れると精度が上がります。年間は推移の補助として扱います。"
+          : "単発PDFを元に分析します。",
     });
   } catch (e: any) {
     console.error("[route POST fatal]", e);
