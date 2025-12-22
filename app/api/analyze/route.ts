@@ -237,7 +237,6 @@ function forceNullifyFourIfMissing(t: any) {
  * ✅ 育成の2科/4科ズレを「範囲」で救う
  * - 2科は 0〜400
  * - 4科は 0〜500
- * OCRズレで 2科欄に 4科っぽい数が入ったら swap
  */
 function fixIkuseiTwoFourByRange(t: any) {
   if (!t || t.testType !== "ikusei") return;
@@ -259,13 +258,10 @@ function fixIkuseiTwoFourByRange(t: any) {
       t.totals.two.grade = fourGrade ?? t.totals.two.grade ?? null;
     }
   }
-
-  // 4科が 0〜400 で、2科が null だけど右側にズレたっぽい時は触らない（誤爆防止）
 }
 
 /**
  * 育成の2科/4科が混ざった時の安全弁（強条件）
- * （既存ロジック：大きくズレたケースだけswap）
  */
 function fixIkuseiTwoFourMix(t: any) {
   if (!t || t.testType !== "ikusei") return;
@@ -292,7 +288,7 @@ function fixIkuseiTwoFourMix(t: any) {
     }
   }
 
-  // ✅ 低得点だから4科をnull化、は誤爆するのでやらない
+  // 低得点だから4科をnull化、は誤爆するのでやらない
 }
 
 // ✅ 公開：4科得点が「日付断片/桁落ち」っぽいときは null
@@ -430,12 +426,20 @@ function buildYearlyFromOcrTextByFormat(
     const date = parseYmdOrYmLoose(m[2]);
     if (!date) continue;
 
-    const fourScore = clampNum(toNumberOrNull(dashToNull(m[3])), 0, 500);
-    // 育成の評価は 3〜10 のみ
-    const fourGrade = clampNum(toNumberOrNull(dashToNull(m[4])), 3, 10);
+    const notes: string[] = [];
 
+    const fourScore = clampNum(toNumberOrNull(dashToNull(m[3])), 0, 500);
     const twoScore = clampNum(toNumberOrNull(dashToNull(m[5])), 0, 400);
-    const twoGrade = clampNum(toNumberOrNull(dashToNull(m[6])), 3, 10);
+
+    // ✅ 育成評価：3〜10以外は「OCR甘い」扱いで null
+    const fourGradeRaw = toNumberOrNull(dashToNull(m[4]));
+    const twoGradeRaw = toNumberOrNull(dashToNull(m[6]));
+
+    const fourGrade = clampNum(fourGradeRaw, 3, 10);
+    const twoGrade = clampNum(twoGradeRaw, 3, 10);
+
+    if (fourGradeRaw === 1 || fourGradeRaw === 2) notes.push(`育成: 4科評価が${fourGradeRaw}として読まれたため破棄`);
+    if (twoGradeRaw === 1 || twoGradeRaw === 2) notes.push(`育成: 2科評価が${twoGradeRaw}として読まれたため破棄`);
 
     const t: any = {
       testType: "ikusei",
@@ -446,13 +450,12 @@ function buildYearlyFromOcrTextByFormat(
         two: { score: twoScore, deviation: null, rank: null, grade: twoGrade },
         four: { score: fourScore, deviation: null, rank: null, grade: fourGrade },
       },
-      notes: [],
+      notes,
     };
 
     nullifyFieldsByType(t);
     forceNullifyFourIfMissing(t);
 
-    // ✅ 追加：範囲補正→既存強条件補正
     fixIkuseiTwoFourByRange(t);
     fixIkuseiTwoFourMix(t);
 
@@ -706,12 +709,18 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       t.totals.two.deviation = clampNum(t.totals.two.deviation, 10, 90);
       t.totals.four.deviation = clampNum(t.totals.four.deviation, 10, 90);
 
-      // 育成の評価だけ 3〜10
       if (t.testType === "ikusei") {
-        t.totals.two.grade = clampNum(t.totals.two.grade, 3, 10);
-        t.totals.four.grade = clampNum(t.totals.four.grade, 3, 10);
+        // ✅ 育成評価は3〜10固定（1・2は“甘い”扱いで落とす）
+        const g2raw = toNumberOrNull(t?.totals?.two?.grade);
+        const g4raw = toNumberOrNull(t?.totals?.four?.grade);
 
-        // ✅ directでも範囲補正をかける
+        t.totals.two.grade = clampNum(g2raw, 3, 10);
+        t.totals.four.grade = clampNum(g4raw, 3, 10);
+
+        t.notes = Array.isArray(t.notes) ? t.notes : [];
+        if (g2raw === 1 || g2raw === 2) t.notes.push(`育成: 2科評価が${g2raw}として読まれたため破棄`);
+        if (g4raw === 1 || g4raw === 2) t.notes.push(`育成: 4科評価が${g4raw}として読まれたため破棄`);
+
         fixIkuseiTwoFourByRange(t);
         fixIkuseiTwoFourMix(t);
       } else {
@@ -756,16 +765,46 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
   if (!yearly) {
     return {
       ikusei: { trend: "unknown" as Trend, values: [] as number[] },
+      ikuseiGradeValues: [] as number[],
+      ikuseiScoreValues: [] as number[],
       kokai: { trend: "unknown" as Trend, values: [] as number[] },
     };
   }
 
   const tests = yearly.tests ?? [];
 
-  // 育成：評価（2科評価を優先）
-  const ikuseiVals: number[] = tests
+  // 育成：gradeだけ（3〜10）
+  const ikuseiGradeValues: number[] = tests
     .filter((t) => t.testType === "ikusei")
-    .map((t: any) => (typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null))
+    .map((t: any) => {
+      const g2 = typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null;
+      const g4 = typeof t?.totals?.four?.grade === "number" ? t.totals.four.grade : null;
+      return g2 ?? g4;
+    })
+    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+
+  // 育成：2科得点だけ（0〜400）
+  const ikuseiScoreValues: number[] = tests
+    .filter((t) => t.testType === "ikusei")
+    .map((t: any) => (typeof t?.totals?.two?.score === "number" ? t.totals.two.score : null))
+    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+
+  // ✅ A案：育成 values は「grade優先、無ければ2科得点で補完」
+  // ※ ここはスケール混在（3〜10 と 0〜400）なので UI はラベル分け推奨
+  const ikuseiUnifiedValues: number[] = tests
+    .filter((t) => t.testType === "ikusei")
+    .map((t: any) => {
+      const g2 = typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null;
+      const g4 = typeof t?.totals?.four?.grade === "number" ? t.totals.four.grade : null;
+      const grade = g2 ?? g4;
+
+      if (typeof grade === "number" && Number.isFinite(grade)) return grade;
+
+      const s2 = typeof t?.totals?.two?.score === "number" ? t.totals.two.score : null;
+      if (typeof s2 === "number" && Number.isFinite(s2)) return s2;
+
+      return null;
+    })
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
   // 公開：偏差（4科偏差優先、無ければ2科）
@@ -781,7 +820,9 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
   return {
-    ikusei: { trend: judgeTrend(ikuseiVals, 1), values: ikuseiVals },
+    ikusei: { trend: judgeTrend(ikuseiUnifiedValues, 1), values: ikuseiUnifiedValues },
+    ikuseiGradeValues,
+    ikuseiScoreValues,
     kokai: { trend: judgeTrend(kokaiVals, 3), values: kokaiVals },
   };
 }
@@ -846,7 +887,7 @@ export async function POST(req: NextRequest) {
           path: uploadedYearly.path,
           filename: uploadedYearly.name,
           focusHint:
-            "III. 前期/前年 学習力育成テスト 出題範囲及び成績（回数・試験実施日・4科目得点・評価・2科目得点・評価の表）",
+            "III. 学習力育成テスト 出題範囲及び成績（回数・試験実施日・4科目得点・評価・2科目得点・評価の表）",
         });
 
         const yearlyOcrTextKokai = await ocrPdfFromStorage({
