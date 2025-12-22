@@ -18,6 +18,16 @@ const openai = new OpenAI({
 });
 
 /* =========================
+   Assumed averages（追加）
+   - 公開模試：偏差50が平均
+   - 育成：評価10段階、平均との差+1以上で平均超え＝6（平均の基準点）
+========================= */
+const ASSUMED_AVERAGE = {
+  kokaiDeviation: 50,
+  ikuseiGradeBase: 6,
+} as const;
+
+/* =========================
    Utils
 ========================= */
 function safeName(name: string) {
@@ -93,6 +103,60 @@ function dedupeTests(tests: any[]) {
 }
 
 /* =========================
+   育成：diffFromAvg → 10〜3 評価（追加）
+   - 平均（基準点）＝6
+   - 「平均との差が +1 点以上で 6」
+   - そこから上位/下位を段階的に分ける
+========================= */
+function calcIkuseiGrade(diffFromAvg: number): number {
+  if (!Number.isFinite(diffFromAvg)) return ASSUMED_AVERAGE.ikuseiGradeBase; // 保険（通常ここは通らない）
+
+  if (diffFromAvg >= 8) return 10;
+  if (diffFromAvg >= 6) return 9;
+  if (diffFromAvg >= 4) return 8;
+  if (diffFromAvg >= 2) return 7;
+  if (diffFromAvg >= 1) return 6;
+  if (diffFromAvg >= -1) return 5;
+  if (diffFromAvg >= -3) return 4;
+  return 3; // 下限固定
+}
+
+/* =========================
+   Trend判定（追加）
+========================= */
+type Trend = "up" | "down" | "flat" | "unknown";
+
+function judgeTrend(values: number[], threshold: number): Trend {
+  if (!Array.isArray(values) || values.length < 2) return "unknown";
+  const first = values[0];
+  const last = values[values.length - 1];
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return "unknown";
+
+  if (last - first >= threshold) return "up";
+  if (first - last >= threshold) return "down";
+  return "flat";
+}
+
+function trendToMessage(kind: "ikusei" | "kokai", t: Trend): string {
+  if (t === "unknown") return "まだ回数が少ないため、今後の推移を見て判断していきましょう。";
+
+  if (kind === "ikusei") {
+    if (t === "up")
+      return "育成は回を重ねるごとに評価が上がっており、上昇傾向です。この調子でいこう。";
+    if (t === "down")
+      return "育成は回を追うごとに評価が下がっています。ここから立て直して、がんばっていこう。";
+    return "育成は大きな上下がなく横ばいです。次の一段階へ、復習の質を上げていこう。";
+  }
+
+  // kokai
+  if (t === "up")
+    return "公開模試は回を重ねるごとに偏差が上がっており、上昇傾向です。成果が形になってきています。";
+  if (t === "down")
+    return "公開模試は回を追うごとに偏差が下がっています。ここが踏ん張りどころ。がんばっていこう。";
+  return "公開模試は横ばいです。あと一段の得点力アップを狙っていこう。";
+}
+
+/* =========================
    OCR（参考用：デバッグ/確認）
    ※年間はdirect抽出が本命。OCRテキストは信用しない。
 ========================= */
@@ -160,7 +224,7 @@ type JukuReportJson = {
         rank: number | null;
         avg: number | null;
         diffFromAvg: number | null;
-        grade: number | null; // 育成の「評価」をここに入れる
+        grade: number | null; // 育成の「評価」をここに入れる（10〜3に拡張）
       };
       four: {
         score: number | null;
@@ -168,7 +232,7 @@ type JukuReportJson = {
         rank: number | null;
         avg: number | null;
         diffFromAvg: number | null;
-        grade: number | null; // 育成の「評価」をここに入れる
+        grade: number | null; // 育成の「評価」をここに入れる（10〜3に拡張）
       };
     };
     notes: string[];
@@ -267,9 +331,9 @@ const JUKU_REPORT_JSON_SCHEMA = {
 
 /* =========================
    Grade fallback (育成の評価の救済)
+   ※ もともとの関数は残しつつ、10〜3にも対応（修正）
 ========================= */
 function pickGradeFallback(t: any): number | null {
-  // 0〜5だけ「評価」とみなす（推測で変換はしない）
   const cands = [
     t?.totals?.two?.grade,
     t?.totals?.four?.grade,
@@ -279,7 +343,8 @@ function pickGradeFallback(t: any): number | null {
     t?.totals?.four?.rank,
   ];
   for (const v of cands) {
-    if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 5) return v;
+    // 10〜3評価にも対応（0〜5限定から変更）
+    if (typeof v === "number" && Number.isFinite(v) && v >= 3 && v <= 10) return v;
   }
   return null;
 }
@@ -312,14 +377,14 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 あなたは「塾の成績推移表（日能研など）」をPDF画像から正確に読み取り、JSON化する担当です。
 
 【このPDFで必ず探す（重要）】
-- 学習力育成テスト：回ごとの「得点」「評価」
+- 学習力育成テスト：回ごとの「得点」「評価（10段階）」または「平均との差（diffFromAvg）」があれば必ず抽出
 - 公開模試：回ごとの「得点」「偏差」
 - 合格力実践テスト/合格力育成テスト：同様に回ごとに表があれば抽出
 
 【抽出ルール】
 - “回ごとの表”は 1行=1回 → tests[] を必ず行数分作る
-- 育成（学習力育成テスト）：評価は totals.two.grade または totals.four.grade に入れる（得点はscore）
-- 公開模試：偏差は totals.two.deviation / totals.four.deviation に入れる（得点はscore）
+- 育成：得点は totals.two.score / totals.four.score、評価は totals.two.grade / totals.four.grade（無いなら null）、平均との差は totals.*.diffFromAvg
+- 公開：得点は totals.*.score、偏差は totals.*.deviation
 - 教科列（国/算/理/社）があるなら subjects[] にも入れる（無いなら nullでOK）
 - 見えない/空欄は null。推測禁止。
 - PDFに存在しない表・項目を作らない（幻覚禁止）
@@ -341,7 +406,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
             type: "input_text",
             text:
               `ファイル名: ${filename}\n` +
-              "このPDFから『育成=得点+評価』『公開=得点+偏差』の回ごとの推移をJSON化してください。推測は禁止。空欄はnull。",
+              "このPDFから『育成=得点(+平均との差)→評価10〜3へ変換』『公開=得点+偏差』の回ごとの推移をJSON化してください。推測は禁止。空欄はnull。",
           },
         ],
       },
@@ -408,13 +473,14 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       grade: null,
     };
 
+    // ★gradeの範囲を 0-5 から 0-10 に拡張（修正）
     t.totals.two = {
       score: clampNum(two.score, 0, 400),
       deviation: clampNum(two.deviation, 10, 90),
       rank: clampNum(two.rank, 1, 50000),
       avg: clampNum(two.avg, 0, 400),
       diffFromAvg: clampNum(two.diffFromAvg, -400, 400),
-      grade: clampNum(two.grade, 0, 5),
+      grade: clampNum(two.grade, 0, 10),
     };
     t.totals.four = {
       score: clampNum(four.score, 0, 500),
@@ -422,14 +488,26 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       rank: clampNum(four.rank, 1, 50000),
       avg: clampNum(four.avg, 0, 500),
       diffFromAvg: clampNum(four.diffFromAvg, -500, 500),
-      grade: clampNum(four.grade, 0, 5),
+      grade: clampNum(four.grade, 0, 10),
     };
 
-    // ===== 修正②：育成テストだけ grade を救済（0〜5がどこかに紛れた場合） =====
+    // ===== 修正②：育成テストだけ grade を救済（10〜3） =====
     if (t.testType === "ikusei") {
-      const g = pickGradeFallback(t);
-      if (t.totals.two.grade == null) t.totals.two.grade = g;
-      if (t.totals.four.grade == null) t.totals.four.grade = g;
+      // 2科
+      const g2 = pickGradeFallback(t);
+      if (t.totals.two.grade == null) t.totals.two.grade = g2;
+
+      // 4科
+      const g4 = pickGradeFallback(t);
+      if (t.totals.four.grade == null) t.totals.four.grade = g4;
+
+      // ★ここが本命：平均との差（diffFromAvg）から 10〜3 を算出（追加）
+      if (t.totals.two.grade == null && typeof t.totals.two.diffFromAvg === "number") {
+        t.totals.two.grade = calcIkuseiGrade(t.totals.two.diffFromAvg);
+      }
+      if (t.totals.four.grade == null && typeof t.totals.four.diffFromAvg === "number") {
+        t.totals.four.grade = calcIkuseiGrade(t.totals.four.diffFromAvg);
+      }
     }
 
     // date整形
@@ -486,7 +564,7 @@ function flattenJukuReportToSubjectsForAnalysis(juku: JukuReportJson | null) {
   if (!juku) return [];
   const rows: Array<{ name: string; deviation: number | null }> = [];
   for (const t of juku.tests ?? []) {
-    // 公開模試だけ偏差を分析に使う（育成は偏差なし想定）
+    // 公開模試だけ偏差を分析に使う（育成は評価で見る）
     if (t.testType !== "kokai_moshi") continue;
     for (const s of t.subjects ?? []) {
       const nm = String(s?.name ?? "").trim();
@@ -516,6 +594,43 @@ function analyzeYearlyReportJson(yearly: any) {
     return { subjects, weakest };
   }
   return { subjects: [], weakest: null };
+}
+
+/* =========================
+   年間推移：トレンド計算（追加）
+   - 育成：grade（評価）を回順で見て、±1で判定
+   - 公開：偏差を回順で見て、±3で判定
+========================= */
+function extractYearlyTrends(yearly: JukuReportJson | null) {
+  if (!yearly) {
+    return {
+      ikusei: { trend: "unknown" as Trend, values: [] as number[] },
+      kokai: { trend: "unknown" as Trend, values: [] as number[] },
+    };
+  }
+
+  const tests = yearly.tests ?? [];
+
+  // できるだけ「2科 totals.two」を優先。無ければ four を補助で使う。
+  const ikuseiVals: number[] = tests
+    .filter((t) => t.testType === "ikusei")
+    .map((t) => (typeof t.totals?.two?.grade === "number" ? t.totals.two.grade : t.totals?.four?.grade))
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+
+  const kokaiVals: number[] = tests
+    .filter((t) => t.testType === "kokai_moshi")
+    .map((t) =>
+      typeof t.totals?.two?.deviation === "number" ? t.totals.two.deviation : t.totals?.four?.deviation
+    )
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+
+  const ikuseiTrend = judgeTrend(ikuseiVals, 1);
+  const kokaiTrend = judgeTrend(kokaiVals, 3);
+
+  return {
+    ikusei: { trend: ikuseiTrend, values: ikuseiVals },
+    kokai: { trend: kokaiTrend, values: kokaiVals },
+  };
 }
 
 /* =========================
@@ -597,6 +712,15 @@ export async function POST(req: NextRequest) {
 
     const yearlyAnalysis = analyzeYearlyReportJson(yearlyReportJson);
 
+    // ★追加：育成/公開の「回ごとの推移」トレンド
+    const yearlyTrends = extractYearlyTrends(yearlyReportJson as JukuReportJson | null);
+
+    // ★追加：トレンドに応じたメッセージ（がんばっていこう含む）
+    const trendCommentary = {
+      ikusei: trendToMessage("ikusei", yearlyTrends.ikusei.trend),
+      kokai: trendToMessage("kokai", yearlyTrends.kokai.trend),
+    };
+
     return NextResponse.json({
       summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
       files: { singles: uploadedSingles, yearly: uploadedYearly },
@@ -612,11 +736,20 @@ export async function POST(req: NextRequest) {
       analysis: {
         singles: { subjects: [], weakest: null },
         yearly: yearlyAnalysis,
+        // ★追加：trend結果をanalysisに同梱
+        trends: {
+          assumedAverage: ASSUMED_AVERAGE,
+          ikusei: yearlyTrends.ikusei,
+          kokai: yearlyTrends.kokai,
+        },
       },
+      // 既存commentaryは残しつつ、trend用のcommentaryも追加
       commentary:
         uploadedSingles.length === 0
           ? "単発PDFが未投入です。メイン分析は単発（育成/公開の1回分）を入れると精度が上がります。年間は推移の補助として扱います。"
           : "単発PDFを元に分析します。",
+      // ★追加：推移コメント
+      trendCommentary,
     });
   } catch (e: any) {
     console.error("[route POST fatal]", e);
