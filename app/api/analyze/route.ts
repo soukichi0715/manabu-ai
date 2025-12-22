@@ -25,6 +25,10 @@ const openai = new OpenAI({
 ========================= */
 type Trend = "up" | "down" | "flat" | "unknown";
 
+// ✅ 追加：返却用
+type AnalysisMode = "full" | "yearly-only";
+type StudentType = "two" | "four";
+
 type JukuReportJson = {
   docType: "juku_report";
   student: { name: string | null; id: string | null };
@@ -309,6 +313,44 @@ function fixKokaiFourScoreIfSuspicious(t: any) {
   }
 
   void fourDev;
+}
+
+/* =========================
+   ✅ 追加：analysisMode / 2科4科判定
+========================= */
+function computeAnalysisMode(singleCount: number): AnalysisMode {
+  return singleCount > 0 ? "full" : "yearly-only";
+}
+
+/**
+ * 年間データだけでも判定できるように：
+ * - 育成テストの totals.two.score が「ほぼ埋まって」いて totals.four.score が「ほぼ空」なら two
+ * - 逆なら four
+ * - 混在は安全側（four）に倒し warning
+ */
+function detectStudentTypeFromYearly(
+  yearly: JukuReportJson | null,
+  warnings: string[]
+): { studentType: StudentType; isTwoSubjectStudent: boolean } {
+  if (!yearly?.tests?.length) return { studentType: "four", isTwoSubjectStudent: false };
+
+  const ikusei = (yearly.tests ?? []).filter((t) => t.testType === "ikusei");
+  const n = ikusei.length;
+  if (n === 0) return { studentType: "four", isTwoSubjectStudent: false };
+
+  const twoPresent = ikusei.filter((t: any) => isFiniteNumber(toNumberOrNull(t?.totals?.two?.score))).length;
+  const fourPresent = ikusei.filter((t: any) => isFiniteNumber(toNumberOrNull(t?.totals?.four?.score))).length;
+
+  const almostAll = Math.max(1, Math.floor(n * 0.7));
+  const few = Math.floor(n * 0.3);
+
+  if (twoPresent >= almostAll && fourPresent <= few) return { studentType: "two", isTwoSubjectStudent: true };
+  if (fourPresent >= almostAll && twoPresent <= few) return { studentType: "four", isTwoSubjectStudent: false };
+
+  warnings.push(
+    `2科/4科判定が混在（育成: twoPresent=${twoPresent}, fourPresent=${fourPresent}, n=${n}）。暫定的に4科扱い。`
+  );
+  return { studentType: "four", isTwoSubjectStudent: false };
 }
 
 /* =========================
@@ -878,6 +920,13 @@ export async function POST(req: NextRequest) {
     for (const f of singleFiles) uploadedSingles.push(await upload(f));
     const uploadedYearly = yearlyFile ? await upload(yearlyFile) : null;
 
+    // ✅ 追加：warnings / analysisMode（UIで使う）
+    const warnings: string[] = [];
+    const analysisMode: AnalysisMode = computeAnalysisMode(uploadedSingles.length);
+    if (analysisMode === "yearly-only") {
+      warnings.push("単発PDFが未投入のため、分析モードは yearly-only（年間推移の参考分析）です。");
+    }
+
     let yearlyOcrText: string | null = null;
     let yearlyOcrError: string | null = null;
 
@@ -951,10 +1000,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // ✅ 追加：2科/4科判定（年間が無い場合は安全側）
+    const st = detectStudentTypeFromYearly((yearlyReportJson as any) ?? null, warnings);
+    const studentType: StudentType = st.studentType;
+    const isTwoSubjectStudent: boolean = st.isTwoSubjectStudent;
+
     const trends = extractYearlyTrends(yearlyReportJson as any);
 
     return NextResponse.json({
       summary: `単発=${uploadedSingles.length}枚 / 年間=${uploadedYearly ? "あり" : "なし"}`,
+
+      // ✅ 追加（フロントで分岐に使える）
+      analysisMode,
+      studentType,
+      isTwoSubjectStudent,
+      warnings,
+
       files: { singles: uploadedSingles, yearly: uploadedYearly },
       ocr: {
         singles: [],
