@@ -206,6 +206,11 @@ function dashToNull(v: any): any {
   return v;
 }
 
+/** ✅ 追加：TSが「nullが消えた」と理解できる型ガード */
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
 /* =========================
    Guards / Normalization
 ========================= */
@@ -781,13 +786,13 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
       const g4 = typeof t?.totals?.four?.grade === "number" ? t.totals.four.grade : null;
       return g2 ?? g4;
     })
-    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+    .filter(isFiniteNumber);
 
   // 育成：2科得点だけ（0〜400）
   const ikuseiScoreValues: number[] = tests
     .filter((t) => t.testType === "ikusei")
     .map((t: any) => (typeof t?.totals?.two?.score === "number" ? t.totals.two.score : null))
-    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+    .filter(isFiniteNumber);
 
   // ✅ A案：育成 values は「grade優先、無ければ2科得点で補完」
   // ※ ここはスケール混在（3〜10 と 0〜400）なので UI はラベル分け推奨
@@ -805,7 +810,7 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
 
       return null;
     })
-    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+    .filter(isFiniteNumber);
 
   // 公開：偏差（4科偏差優先、無ければ2科）
   const kokaiVals: number[] = tests
@@ -817,7 +822,7 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
           ? t.totals.two.deviation
           : null
     )
-    .filter((v: any) => typeof v === "number" && Number.isFinite(v));
+    .filter(isFiniteNumber);
 
   return {
     ikusei: { trend: judgeTrend(ikuseiUnifiedValues, 1), values: ikuseiUnifiedValues },
