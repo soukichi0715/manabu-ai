@@ -202,7 +202,7 @@ function sliceBetweenAny(text: string, starts: RegExp[], ends: RegExp[]) {
 
 function dashToNull(v: any): any {
   const s = String(v ?? "").trim();
-  if (s === "-" || s === "—" || s === "－") return null;
+  if (s === "-" || s === "—" || s === "－" || s === "") return null;
   return v;
 }
 
@@ -210,11 +210,13 @@ function dashToNull(v: any): any {
    Guards / Normalization
 ========================= */
 function nullifyFieldsByType(t: any) {
+  // 育成：score + grade（偏差は使わない）
   if (t.testType === "ikusei") {
     if (t?.totals?.two) t.totals.two.deviation = null;
     if (t?.totals?.four) t.totals.four.deviation = null;
   }
 
+  // 公開：score + deviation（gradeは使わない）
   if (t.testType === "kokai_moshi") {
     if (t?.totals?.two) t.totals.two.grade = null;
     if (t?.totals?.four) t.totals.four.grade = null;
@@ -232,7 +234,38 @@ function forceNullifyFourIfMissing(t: any) {
 }
 
 /**
- * 育成の2科/4科が混ざった時の安全弁（誤爆しにくい強条件）
+ * ✅ 育成の2科/4科ズレを「範囲」で救う
+ * - 2科は 0〜400
+ * - 4科は 0〜500
+ * OCRズレで 2科欄に 4科っぽい数が入ったら swap
+ */
+function fixIkuseiTwoFourByRange(t: any) {
+  if (!t || t.testType !== "ikusei") return;
+  if (!t.totals?.two || !t.totals?.four) return;
+
+  const twoScore = toNumberOrNull(t.totals.two.score);
+  const fourScore = toNumberOrNull(t.totals.four.score);
+
+  // 2科が 401〜500 なら、それは4科得点の可能性が高い
+  // かつ 4科が 0〜400 なら入れ替え
+  if (twoScore != null && twoScore > 400 && twoScore <= 500) {
+    if (fourScore == null || (fourScore >= 0 && fourScore <= 400)) {
+      t.totals.four.score = twoScore;
+      t.totals.two.score = fourScore ?? null;
+
+      const twoGrade = toNumberOrNull(t.totals.two.grade);
+      const fourGrade = toNumberOrNull(t.totals.four.grade);
+      t.totals.four.grade = twoGrade ?? t.totals.four.grade ?? null;
+      t.totals.two.grade = fourGrade ?? t.totals.two.grade ?? null;
+    }
+  }
+
+  // 4科が 0〜400 で、2科が null だけど右側にズレたっぽい時は触らない（誤爆防止）
+}
+
+/**
+ * 育成の2科/4科が混ざった時の安全弁（強条件）
+ * （既存ロジック：大きくズレたケースだけswap）
  */
 function fixIkuseiTwoFourMix(t: any) {
   if (!t || t.testType !== "ikusei") return;
@@ -259,8 +292,7 @@ function fixIkuseiTwoFourMix(t: any) {
     }
   }
 
-  // ✅ 修正：ここは誤爆して4科を消すので撤廃（<=120 などは使わない）
-  // （低得点でも普通にあり得るため、得点値だけでnull化しない）
+  // ✅ 低得点だから4科をnull化、は誤爆するのでやらない
 }
 
 // ✅ 公開：4科得点が「日付断片/桁落ち」っぽいときは null
@@ -284,10 +316,12 @@ function fixKokaiFourScoreIfSuspicious(t: any) {
 function detectYearlyFormatFromOcrText(text: string): YearlyFormat {
   const t = String(text ?? "");
 
+  // 5年寄り（B）
   if (/Public模試成績/i.test(t)) return "B";
   if (/年間学習力育成テスト/i.test(t)) return "B";
   if (/(Ⅲ|III)\s*[\.．]\s*年間学習力育成テスト/i.test(t)) return "B";
 
+  // 6年寄り（A）
   if (/(V|Ⅴ)\s*[\.．]\s*公開模試成績/i.test(t)) return "A";
   if (/(Ⅲ|III)\s*[\.．]\s*(前期|前年)学習力育成テスト/i.test(t)) return "A";
 
@@ -386,10 +420,10 @@ function buildYearlyFromOcrTextByFormat(
 
   const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
 
-  // ✅ 修正：2科目 得点/評価 が「-」でもマッチするようにする
+  // ✅ 2科の得点/評価が "-" でも拾う
   // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 | ...
   const ikuseiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|[^\r\n]*(?:\r?\n|$)/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|[^\r\n]*(?:\r?\n|$)/g;
 
   for (const m of ikuseiBlock.matchAll(ikuseiRowRe)) {
     const n = Number(m[1]);
@@ -397,13 +431,10 @@ function buildYearlyFromOcrTextByFormat(
     if (!date) continue;
 
     const fourScore = clampNum(toNumberOrNull(dashToNull(m[3])), 0, 500);
-
     // 育成の評価は 3〜10 のみ
     const fourGrade = clampNum(toNumberOrNull(dashToNull(m[4])), 3, 10);
 
     const twoScore = clampNum(toNumberOrNull(dashToNull(m[5])), 0, 400);
-
-    // 育成の評価は 3〜10 のみ
     const twoGrade = clampNum(toNumberOrNull(dashToNull(m[6])), 3, 10);
 
     const t: any = {
@@ -420,6 +451,9 @@ function buildYearlyFromOcrTextByFormat(
 
     nullifyFieldsByType(t);
     forceNullifyFourIfMissing(t);
+
+    // ✅ 追加：範囲補正→既存強条件補正
+    fixIkuseiTwoFourByRange(t);
     fixIkuseiTwoFourMix(t);
 
     yearly.tests.push(t);
@@ -443,11 +477,14 @@ function buildYearlyFromOcrTextByFormat(
 
   const kokaiBlock = sliceBetweenAny(ocrText, kokaiStarts, kokaiEnds);
 
+  // ✅ 公開：2科列が空でも拾う（? で任意）
+  // | 回 | 年 | 月 | 日 | 4科得点 | 偏差 | 2科得点 | 偏差 |
   const kokaiRowReSplit =
-    /\|\s*(\d{1,2})\s*\|\s*(20\d{2})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
+    /\|\s*(\d{1,2})\s*\|\s*(20\d{2})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})\s*\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|\s*([^|]*)?\|\s*([^|]*)?\|/g;
 
+  // | 回 | 日付 | 4科得点 | 偏差 | 2科得点 | 偏差 |
   const kokaiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3}|\-)\s*\|\s*([0-9]{1,2}(?:\.\d+)?|\-)\s*\|\s*([^|]*)?\|\s*([^|]*)?\|/g;
 
   let matchedAnyKokai = false;
 
@@ -465,11 +502,14 @@ function buildYearlyFromOcrTextByFormat(
         : null;
     if (!date) continue;
 
-    const fourScore = clampNum(toNumberOrNull(m[5]), 0, 500);
-    const fourDev = clampNum(toNumberOrNull(m[6]), 10, 90);
+    const fourScore = clampNum(toNumberOrNull(dashToNull(m[5])), 0, 500);
+    const fourDev = clampNum(toNumberOrNull(dashToNull(m[6])), 10, 90);
 
-    const twoScore = clampNum(toNumberOrNull(m[7]), 0, 400);
-    const twoDev = clampNum(toNumberOrNull(m[8]), 10, 90);
+    const twoScore = clampNum(toNumberOrNull(dashToNull(m[7])), 0, 400);
+    let twoDev = clampNum(toNumberOrNull(dashToNull(m[8])), 10, 90);
+
+    // ✅ twoScore が無いなら twoDev も必ず null（誤読10対策）
+    if (twoScore == null) twoDev = null;
 
     const t: any = {
       testType: "kokai_moshi",
@@ -496,11 +536,12 @@ function buildYearlyFromOcrTextByFormat(
       const date = parseYmdOrYmLoose(m[2]);
       if (!date) continue;
 
-      const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
-      const fourDev = clampNum(toNumberOrNull(m[4]), 10, 90);
+      const fourScore = clampNum(toNumberOrNull(dashToNull(m[3])), 0, 500);
+      const fourDev = clampNum(toNumberOrNull(dashToNull(m[4])), 10, 90);
 
-      const twoScore = clampNum(toNumberOrNull(m[5]), 0, 400);
-      const twoDev = clampNum(toNumberOrNull(m[6]), 10, 90);
+      const twoScore = clampNum(toNumberOrNull(dashToNull(m[5])), 0, 400);
+      let twoDev = clampNum(toNumberOrNull(dashToNull(m[6])), 10, 90);
+      if (twoScore == null) twoDev = null;
 
       const t: any = {
         testType: "kokai_moshi",
@@ -522,6 +563,7 @@ function buildYearlyFromOcrTextByFormat(
     }
   }
 
+  // 念のため：育成/公開のみ + 学判除外
   yearly.tests = yearly.tests
     .map((t: any) => {
       const nm = String(t?.testName ?? "");
@@ -668,14 +710,21 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       if (t.testType === "ikusei") {
         t.totals.two.grade = clampNum(t.totals.two.grade, 3, 10);
         t.totals.four.grade = clampNum(t.totals.four.grade, 3, 10);
+
+        // ✅ directでも範囲補正をかける
+        fixIkuseiTwoFourByRange(t);
+        fixIkuseiTwoFourMix(t);
       } else {
         t.totals.two.grade = clampNum(t.totals.two.grade, 0, 10);
         t.totals.four.grade = clampNum(t.totals.four.grade, 0, 10);
+
+        // ✅ 公開：twoScore無いならtwoDev null
+        const twoScore = toNumberOrNull(t?.totals?.two?.score);
+        if (twoScore == null && t?.totals?.two) t.totals.two.deviation = null;
       }
 
       nullifyFieldsByType(t);
       forceNullifyFourIfMissing(t);
-      fixIkuseiTwoFourMix(t);
       fixKokaiFourScoreIfSuspicious(t);
     }
 
@@ -713,11 +762,13 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
 
   const tests = yearly.tests ?? [];
 
+  // 育成：評価（2科評価を優先）
   const ikuseiVals: number[] = tests
     .filter((t) => t.testType === "ikusei")
     .map((t: any) => (typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null))
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
+  // 公開：偏差（4科偏差優先、無ければ2科）
   const kokaiVals: number[] = tests
     .filter((t) => t.testType === "kokai_moshi")
     .map((t: any) =>
