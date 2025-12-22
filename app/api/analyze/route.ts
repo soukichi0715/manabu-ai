@@ -32,10 +32,24 @@ function safeName(name: string) {
   return name.replace(/[^\w.\-()]+/g, "_");
 }
 
+/** ★追加：文字列の "34" / "31.5" / "偏差34" などを数値化して拾う */
+function toNumberOrNull(v: any): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const s = v.replace(/[^\d.\-]/g, "");
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** ★修正：clampNum が文字列でも数値化して判定できるように */
 function clampNum(n: any, min: number, max: number): number | null {
-  if (typeof n !== "number" || !Number.isFinite(n)) return null;
-  if (n < min || n > max) return null;
-  return n;
+  const v = toNumberOrNull(n);
+  if (v === null) return null;
+  if (v < min || v > max) return null;
+  return v;
 }
 
 function safeParseJson<T>(text: string): T | null {
@@ -65,7 +79,7 @@ function isGakuhanLike(testNameOrType: string) {
   return /(学判|学力判定|学力診断|学力テスト|学力到達度|到達度テスト)/.test(t);
 }
 
-/** 取得対象は「育成」「公開」だけ */
+/** 取得対象は「育成」「公開」だけ（学判はother→後で除外） */
 function normalizeTestTypeLabel(s: string) {
   const t = String(s ?? "").replace(/\s+/g, "");
 
@@ -159,37 +173,6 @@ function trendToMessage(kind: "ikusei" | "kokai", t: Trend): string {
   if (t === "down")
     return "公開模試は回を追うごとに偏差が下がっています。ここが踏ん張りどころ。がんばっていこう。";
   return "公開模試は横ばいです。あと一段の得点力アップを狙っていこう。";
-}
-
-/* =========================
-   ★追加：内容から testType を推定して補正
-   - 偏差(deviation)があれば公開
-   - grade / diffFromAvg があれば育成
-   - 学判は除外
-========================= */
-function inferTestTypeFromContent(t: any): "ikusei" | "kokai_moshi" | "other" {
-  const name = String(t?.testName ?? t?.testType ?? "");
-  if (isGakuhanLike(name)) return "other";
-
-  // 公開の判定：偏差がどこかにある
-  const hasDev =
-    typeof t?.totals?.two?.deviation === "number" ||
-    typeof t?.totals?.four?.deviation === "number" ||
-    (Array.isArray(t?.subjects) && t.subjects.some((s: any) => typeof s?.deviation === "number"));
-
-  if (hasDev) return "kokai_moshi";
-
-  // 育成の判定：grade または diffFromAvg がどこかにある
-  const hasIkuseiSignal =
-    typeof t?.totals?.two?.grade === "number" ||
-    typeof t?.totals?.four?.grade === "number" ||
-    typeof t?.totals?.two?.diffFromAvg === "number" ||
-    typeof t?.totals?.four?.diffFromAvg === "number" ||
-    (Array.isArray(t?.subjects) && t.subjects.some((s: any) => typeof s?.diffFromAvg === "number"));
-
-  if (hasIkuseiSignal) return "ikusei";
-
-  return "other";
 }
 
 /* =========================
@@ -365,6 +348,39 @@ const JUKU_REPORT_JSON_SCHEMA = {
 } as const;
 
 /* =========================
+   ★修正：公開/育成の最終判定（公開模試の文字があれば優先）
+========================= */
+function inferTestTypeFromContent(t: any): "ikusei" | "kokai_moshi" | "other" {
+  const name = String(t?.testName ?? t?.testType ?? "");
+  const normalized = name.replace(/\s+/g, "");
+
+  // 学判は除外
+  if (isGakuhanLike(normalized)) return "other";
+
+  // ★最優先：名前に「公開模試」が入っていたら偏差未抽出でも公開扱い
+  if (/(公開模試|公開模擬試験|公開模試成績|公開)/.test(normalized)) return "kokai_moshi";
+
+  // 公開の保険：偏差がどこかにある
+  const hasDev =
+    typeof t?.totals?.two?.deviation === "number" ||
+    typeof t?.totals?.four?.deviation === "number" ||
+    (Array.isArray(t?.subjects) && t.subjects.some((s: any) => typeof s?.deviation === "number"));
+  if (hasDev) return "kokai_moshi";
+
+  // 育成の判定：grade または diffFromAvg がどこかにある
+  const hasIkuseiSignal =
+    typeof t?.totals?.two?.grade === "number" ||
+    typeof t?.totals?.four?.grade === "number" ||
+    typeof t?.totals?.two?.diffFromAvg === "number" ||
+    typeof t?.totals?.four?.diffFromAvg === "number" ||
+    (Array.isArray(t?.subjects) && t.subjects.some((s: any) => typeof s?.diffFromAvg === "number"));
+
+  if (hasIkuseiSignal) return "ikusei";
+
+  return "other";
+}
+
+/* =========================
    Direct extraction from PDF (本命)
 ========================= */
 async function extractJukuReportJsonDirectFromPdf(params: {
@@ -396,12 +412,12 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 - 公開模試：回ごとの「得点」「偏差」
 
 【除外（絶対に拾わない）】
-- 学判／学力判定／学力診断など（この系統は不要）
+- 学判／学力判定／学力診断など
 
 【抽出ルール】
 - “回ごとの表”は 1行=1回 → tests[] を必ず行数分作る
 - 育成：得点は totals.*.score、平均との差は totals.*.diffFromAvg、評価は totals.*.grade（無ければ null）
-- 公開：得点は totals.*.score、偏差は totals.*.deviation
+- 公開：得点は totals.*.score、偏差は totals.*.deviation（必ず「偏差」列から）
 - 見えない/空欄は null。推測禁止。
 - PDFに存在しない表・項目を作らない（幻覚禁止）
 `.trim()
@@ -464,7 +480,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
         ...s,
         name,
         score: clampNum(s.score, 0, 200),
-        deviation: clampNum(s.deviation, 10, 90),
+        deviation: clampNum(s.deviation, 10, 90), // ★文字列でも拾える
         rank: clampNum(s.rank, 1, 50000),
         avg: clampNum(s.avg, 0, 200),
         diffFromAvg: clampNum(s.diffFromAvg, -200, 200),
@@ -490,7 +506,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 
     t.totals.two = {
       score: clampNum(two.score, 0, 400),
-      deviation: clampNum(two.deviation, 10, 90),
+      deviation: clampNum(two.deviation, 10, 90), // ★文字列でも拾える
       rank: clampNum(two.rank, 1, 50000),
       avg: clampNum(two.avg, 0, 400),
       diffFromAvg: clampNum(two.diffFromAvg, -400, 400),
@@ -498,7 +514,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
     };
     t.totals.four = {
       score: clampNum(four.score, 0, 500),
-      deviation: clampNum(four.deviation, 10, 90),
+      deviation: clampNum(four.deviation, 10, 90), // ★文字列でも拾える
       rank: clampNum(four.rank, 1, 50000),
       avg: clampNum(four.avg, 0, 500),
       diffFromAvg: clampNum(four.diffFromAvg, -500, 500),
@@ -514,11 +530,9 @@ async function extractJukuReportJsonDirectFromPdf(params: {
       t.totals.four.grade = calcIkuseiGrade(t.totals.four.diffFromAvg);
     }
 
-    // ★追加：内容から最終 testType を推定（第1回…問題の解決）
+    // ★最終分類：公開模試の文字があれば公開、偏差が文字列でも拾えた状態で判定される
     const inferred = inferTestTypeFromContent(t);
-    if (inferred !== "other") {
-      t.testType = inferred;
-    }
+    if (inferred !== "other") t.testType = inferred;
 
     // date整形
     if (t.date && /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(t.date)) {
@@ -529,7 +543,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
     t.notes = Array.isArray(t.notes) ? t.notes : [];
   }
 
-  // ★ここが重要：最終的に ikusei / kokai_moshi だけ残す（学判含むotherは消す）
+  // 最終的に ikusei / kokai_moshi だけ残す（学判含むotherは消す）
   parsed.tests = (parsed.tests ?? []).filter((t) => t.testType === "ikusei" || t.testType === "kokai_moshi");
 
   parsed.tests = dedupeTests(parsed.tests);
