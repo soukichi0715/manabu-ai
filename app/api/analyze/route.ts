@@ -20,75 +20,10 @@ const openai = new OpenAI({
 });
 
 /* =========================
-   Utils
+   Types
 ========================= */
-function safeName(name: string) {
-  return name.replace(/[^\w.\-()]+/g, "_");
-}
+type Trend = "up" | "down" | "flat" | "unknown";
 
-function toNumberOrNull(v: any): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string") {
-    const s = v.replace(/[^\d.\-]/g, "");
-    if (!s) return null;
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  }
-  return null;
-}
-
-function clampNum(n: any, min: number, max: number): number | null {
-  const v = toNumberOrNull(n);
-  if (v === null) return null;
-  if (v < min || v > max) return null;
-  return v;
-}
-
-function safeParseJson<T>(text: string): T | null {
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeTestTypeLabel(s: string) {
-  const t = String(s ?? "").replace(/\s+/g, "");
-  if (/(学習力育成テスト|育成テスト|学習力育成|育成)/.test(t)) return "ikusei";
-  if (/(公開模試|公開模擬試験|公開模試成績|公開)/.test(t)) return "kokai_moshi";
-  return "other";
-}
-
-function isGakuhanLike(s: string) {
-  const t = String(s ?? "").replace(/\s+/g, "");
-  return /(学判|学力判定|学力診断|学力到達度|到達度テスト)/.test(t);
-}
-
-function parseYmdLoose(s: string): string | null {
-  // "2025 2/16" / "2025 2 9" / "2025 10 5" などを許容して YYYY-MM-DD にする
-  const t = String(s ?? "").trim();
-  const m = t.match(/(20\d{2})\s*[\/\-\.\s]\s*(\d{1,2})\s*[\/\-\.\s]\s*(\d{1,2})/);
-  if (!m) return null;
-  const yy = Number(m[1]);
-  const mm = Number(m[2]);
-  const dd = Number(m[3]);
-  if (!Number.isFinite(yy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
-  if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
-  return `${String(yy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
-}
-
-function sliceBetween(text: string, startMarker: RegExp, endMarker: RegExp) {
-  const start = text.search(startMarker);
-  if (start < 0) return "";
-  const sub = text.slice(start);
-  const end = sub.search(endMarker);
-  if (end < 0) return sub;
-  return sub.slice(0, end);
-}
-
-/* =========================
-   JSON Types / Schema
-========================= */
 type JukuReportJson = {
   docType: "juku_report";
   student: { name: string | null; id: string | null };
@@ -128,8 +63,18 @@ type JukuReportJson = {
   notes: string[];
 };
 
+type YearlyFormat = "auto" | "A" | "B";
+
+/* =========================
+   Constants
+========================= */
+const ASSUMED_AVERAGE = {
+  kokaiDeviationAvg: 50, // 公開模試：偏差50が平均
+  ikuseiGradeAvg: 6, // 育成：平均評価を6とみなす
+};
+
 /**
- * ✅ docType に type を必ず入れる（これが無いと 400 schema error）
+ * ✅ Schemaエラー回避：docTypeにtype必須
  */
 const JUKU_REPORT_JSON_SCHEMA = {
   name: "juku_report_json",
@@ -165,18 +110,102 @@ const JUKU_REPORT_JSON_SCHEMA = {
 } as const;
 
 /* =========================
-   Assumed averages（平均点が載っていない前提）
+   Utils
 ========================= */
-const ASSUMED_AVERAGE = {
-  kokaiDeviationAvg: 50, // 公開模試：偏差50が平均
-  ikuseiGradeAvg: 6, // 育成：平均評価を6とみなす（運用ルール）
-};
+function safeName(name: string) {
+  return name.replace(/[^\w.\-()]+/g, "_");
+}
+
+function toNumberOrNull(v: any): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const s = v.replace(/[^\d.\-]/g, "");
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function clampNum(n: any, min: number, max: number): number | null {
+  const v = toNumberOrNull(n);
+  if (v === null) return null;
+  if (v < min || v > max) return null;
+  return v;
+}
+
+function safeParseJson<T>(text: string): T | null {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTestTypeLabel(s: string) {
+  const t = String(s ?? "").replace(/\s+/g, "");
+  if (/(学習力育成テスト|育成テスト|学習力育成|育成)/.test(t)) return "ikusei";
+  if (/(公開模試|公開模擬試験|公開模試成績|公開|Public模試成績|Public模試)/i.test(t)) return "kokai_moshi";
+  return "other";
+}
+
+function isGakuhanLike(s: string) {
+  const t = String(s ?? "").replace(/\s+/g, "");
+  return /(学判|学力判定|学力診断|学力到達度|到達度テスト)/.test(t);
+}
+
+function parseYmdOrYmLoose(s: string): string | null {
+  const t = String(s ?? "").trim();
+
+  // YYYY/M/D or YYYY-M-D etc
+  const m1 = t.match(/(20\d{2})\s*[\/\-\.\s]\s*(\d{1,2})\s*[\/\-\.\s]\s*(\d{1,2})/);
+  if (m1) {
+    const yy = Number(m1[1]);
+    const mm = Number(m1[2]);
+    const dd = Number(m1[3]);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${String(yy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  // YYYY/M（年月のみ）→ day=01
+  const m2 = t.match(/(20\d{2})\s*[\/\-\.\s]\s*(\d{1,2})\b/);
+  if (m2) {
+    const yy = Number(m2[1]);
+    const mm = Number(m2[2]);
+    if (mm >= 1 && mm <= 12) {
+      return `${String(yy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-01`;
+    }
+  }
+
+  return null;
+}
+
+function sliceBetweenAny(text: string, starts: RegExp[], ends: RegExp[]) {
+  let startPos = -1;
+  for (const st of starts) {
+    const p = text.search(st);
+    if (p >= 0 && (startPos < 0 || p < startPos)) startPos = p;
+  }
+  if (startPos < 0) return "";
+
+  const sub = text.slice(startPos);
+
+  let endPos = -1;
+  for (const ed of ends) {
+    const p = sub.search(ed);
+    if (p >= 0 && (endPos < 0 || p < endPos)) endPos = p;
+  }
+  if (endPos < 0) return sub;
+
+  return sub.slice(0, endPos);
+}
 
 /* =========================
-   ★安全弁：幻覚値の排除＆2科のみ回は4科null
+   Guards / Normalization
 ========================= */
 function nullifyFieldsByType(t: any) {
-  // 育成は score + grade のみ（avg/diffFromAvg は採用しない）
+  // 育成は score + grade
   if (t.testType === "ikusei") {
     if (t?.totals?.two) {
       t.totals.two.avg = null;
@@ -190,7 +219,7 @@ function nullifyFieldsByType(t: any) {
     }
   }
 
-  // 公開は score + deviation のみ（grade/avg/diffFromAvg は採用しない）
+  // 公開は score + deviation
   if (t.testType === "kokai_moshi") {
     if (t?.totals?.two) {
       t.totals.two.grade = null;
@@ -206,7 +235,6 @@ function nullifyFieldsByType(t: any) {
 }
 
 function forceNullifyFourIfMissing(t: any) {
-  // 4科が空欄の回は、4科をnullに
   if (!t?.totals?.four) return;
   const fourScore = toNumberOrNull(t.totals.four.score);
   const fourDev = toNumberOrNull(t.totals.four.deviation);
@@ -223,8 +251,67 @@ function forceNullifyFourIfMissing(t: any) {
   }
 }
 
+/**
+ * 育成の2科/4科が混ざった時の最低限の安全弁（誤爆しにくい強条件）
+ */
+function fixIkuseiTwoFourMix(t: any) {
+  if (!t || t.testType !== "ikusei") return;
+  if (!t.totals?.two || !t.totals?.four) return;
+
+  const twoScore = toNumberOrNull(t.totals.two.score);
+  const fourScore = toNumberOrNull(t.totals.four.score);
+  const twoGrade = toNumberOrNull(t.totals.two.grade);
+  const fourGrade = toNumberOrNull(t.totals.four.grade);
+
+  if (twoScore == null && fourScore == null) return;
+
+  // 4科が小さすぎ、2科が大きすぎ → 入れ替わりの可能性が高い
+  if (fourScore != null && twoScore != null) {
+    const fourTooSmall = fourScore <= 170;
+    const twoTooBig = twoScore >= 220;
+    if (fourTooSmall && twoTooBig) {
+      t.totals.two.score = fourScore;
+      t.totals.four.score = twoScore;
+
+      // 評価も入れ替え（存在するものだけ）
+      t.totals.two.grade = fourGrade ?? t.totals.two.grade ?? null;
+      t.totals.four.grade = twoGrade ?? t.totals.four.grade ?? null;
+      return;
+    }
+  }
+
+  // 4科が異常に小さく、2科も無い/小さい → 4科は空欄扱い
+  if (fourScore != null && fourScore <= 120) {
+    const twoMissingOrSmall = twoScore == null || twoScore <= 120;
+    if (twoMissingOrSmall) {
+      t.totals.four.score = null;
+      t.totals.four.grade = null;
+      t.totals.four.deviation = null;
+    }
+  }
+}
+
 /* =========================
-   OCR（PDFを input_file で渡す：必須）
+   Format Detection
+========================= */
+function detectYearlyFormatFromOcrText(text: string): YearlyFormat {
+  const t = String(text ?? "");
+  // 5年でよく出る表記
+  if (/Public模試成績/i.test(t)) return "B";
+  if (/年間学習力育成テスト/i.test(t)) return "B";
+
+  // 6年でよく出る表記
+  if (/V\.\s*公開模試成績/i.test(t)) return "A";
+  if (/III\.\s*前期学習力育成テスト/i.test(t)) return "A";
+
+  // どちらとも言えないが、公開/育成の語があればとりあえずAで試す（後でBも試す）
+  if (/公開模試成績|公開模試|育成テスト/.test(t)) return "A";
+
+  return "auto";
+}
+
+/* =========================
+   OCR (PDF -> text)
 ========================= */
 async function ocrPdfFromStorage(params: { bucket: string; path: string; filename: string }) {
   const { bucket, path, filename } = params;
@@ -267,10 +354,9 @@ async function ocrPdfFromStorage(params: { bucket: string; path: string; filenam
 }
 
 /* =========================
-   ★追加：OCRテキストから“確実に”育成/公開の行を抽出してJSON化
-   - LLMに表の行生成を任せない（取りこぼし防止）
+   Build yearly JSON from OCR text (format aware)
 ========================= */
-function buildYearlyFromOcrText(ocrText: string, sourceFilename: string): JukuReportJson {
+function buildYearlyFromOcrTextByFormat(ocrText: string, sourceFilename: string, format: Exclude<YearlyFormat, "auto">) {
   const yearly: JukuReportJson = {
     docType: "juku_report",
     student: { name: null, id: null },
@@ -279,29 +365,39 @@ function buildYearlyFromOcrText(ocrText: string, sourceFilename: string): JukuRe
     notes: [],
   };
 
-  // 1) 育成（III. 前期学習力育成テスト出題範囲及び成績）だけ切り出し
-  const ikuseiBlock = sliceBetween(
-    ocrText,
-    /III\.\s*前期学習力育成テスト出題範囲及び成績/i,
-    /合格力実践テスト/i
-  );
+  // ===== 育成ブロック =====
+  // A: 「III. 前期学習力育成テスト…」
+  // B: 「III. 年間学習力育成テスト…」が多い
+  const ikuseiStarts =
+    format === "A"
+      ? [/III\.\s*前期学習力育成テスト出題範囲及び成績/i, /III\.\s*前期学習力育成テスト/i]
+      : [/III\.\s*年間学習力育成テスト出題範囲及び成績/i, /III\.\s*年間学習力育成テスト/i];
 
-  // 形式例：
-  // | 1 | 2025 2/16 | 131 | 4 | 65 | 4 | ...
-  // 回数 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 |
+  const ikuseiEnds = [
+    /思考力育成テスト/i,
+    /合格力実践テスト/i,
+    /IV\./i,
+    /V\./i,
+    /公開模試/i,
+    /Public模試/i,
+  ];
+
+  const ikuseiBlock = sliceBetweenAny(ocrText, ikuseiStarts, ikuseiEnds);
+
+  // 育成表の行（OCRがズレても拾いやすい形）
+  // | 回 | 日付 | 4科得点 | 評価 | 2科得点 | 評価 |
   const ikuseiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*(20\d{2}\s*[\d\/\s]{1,6}\d{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2})\s*\|/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|/g;
 
   for (const m of ikuseiBlock.matchAll(ikuseiRowRe)) {
     const n = Number(m[1]);
-    const date = parseYmdLoose(m[2]);
-    const fourScore = clampNum(Number(m[3]), 0, 500);
-    const fourGrade = clampNum(Number(m[4]), 0, 10);
-    const twoScore = clampNum(Number(m[5]), 0, 400);
-    const twoGrade = clampNum(Number(m[6]), 0, 10);
+    const date = parseYmdOrYmLoose(m[2]);
 
-    // 「2科だけ」「4科だけ」両対応：空欄ならnullにしたいが、この正規表現は両方ある行だけ拾う。
-    // もし将来「4科空欄」行がある場合は正規表現を追加で拾う（必要になったら足す）
+    const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
+    const fourGrade = clampNum(toNumberOrNull(m[4]), 0, 10);
+    const twoScore = clampNum(toNumberOrNull(m[5]), 0, 400);
+    const twoGrade = clampNum(toNumberOrNull(m[6]), 0, 10);
+
     const t: any = {
       testType: "ikusei",
       testName: `第${n}回育成テスト`,
@@ -316,27 +412,39 @@ function buildYearlyFromOcrText(ocrText: string, sourceFilename: string): JukuRe
 
     nullifyFieldsByType(t);
     forceNullifyFourIfMissing(t);
+    fixIkuseiTwoFourMix(t);
 
     yearly.tests.push(t);
   }
 
-  // 2) 公開（V. 公開模試成績）だけ切り出し
-  const kokaiBlock = sliceBetween(ocrText, /V\.\s*公開模試成績/i, /合格力育成テスト/i);
+  // ===== 公開ブロック =====
+  const kokaiStarts =
+    format === "A"
+      ? [/V\.\s*公開模試成績/i, /公開模試成績/i]
+      : [/Public模試成績/i, /公開模試成績/i, /V\.\s*公開模試成績/i];
 
-  // 形式例：
-  // | 1 | 2025 2 9 | 49 | 28 |  |  |
-  // 回 | 年月日 | 4科得点 | 偏差 | 2科得点 | 偏差 |
+  const kokaiEnds = [
+    /春期/i,
+    /夏期/i,
+    /冬期/i,
+    /合格力育成テスト/i,
+    /合格力実践テスト/i,
+    /---\s*$/m,
+  ];
+
+  const kokaiBlock = sliceBetweenAny(ocrText, kokaiStarts, kokaiEnds);
+
+  // | 回 | 年月日(または年月) | 4科得点 | 偏差 | 2科得点 | 偏差 |
   const kokaiRowRe =
-    /\|\s*(\d{1,2})\s*\|\s*(20\d{2}\s*[\d\/\s]{1,6}\d{1,2})\s*\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
+    /\|\s*(\d{1,2})\s*\|\s*([^\|]{3,24})\|\s*([0-9]{1,3})\s*\|\s*([0-9]{1,2}(?:\.\d+)?)\s*\|\s*([^|]*)\|\s*([^|]*)\|/g;
 
   for (const m of kokaiBlock.matchAll(kokaiRowRe)) {
     const n = Number(m[1]);
-    const date = parseYmdLoose(m[2]);
+    const date = parseYmdOrYmLoose(m[2]);
 
     const fourScore = clampNum(toNumberOrNull(m[3]), 0, 500);
     const fourDev = clampNum(toNumberOrNull(m[4]), 10, 90);
 
-    // 2科は空欄のことが多いので、空欄ならnull
     const twoScore = clampNum(toNumberOrNull(m[5]), 0, 400);
     const twoDev = clampNum(toNumberOrNull(m[6]), 10, 90);
 
@@ -358,10 +466,15 @@ function buildYearlyFromOcrText(ocrText: string, sourceFilename: string): JukuRe
     yearly.tests.push(t);
   }
 
-  // 学判やその他が混じっていない前提だが、念のため再フィルタ
-  yearly.tests = yearly.tests.filter((t) => t.testType === "ikusei" || t.testType === "kokai_moshi");
+  // 念のため：育成/公開のみ + 学判除外
+  yearly.tests = yearly.tests
+    .map((t: any) => {
+      const nm = String(t?.testName ?? "");
+      const tt = normalizeTestTypeLabel(nm);
+      return { ...t, testType: tt };
+    })
+    .filter((t: any) => (t.testType === "ikusei" || t.testType === "kokai_moshi") && !isGakuhanLike(String(t?.testName ?? "")));
 
-  // ざっくり並び：日付が取れたものを優先して昇順
   yearly.tests.sort((a, b) => {
     const da = a.date ?? "";
     const db = b.date ?? "";
@@ -374,8 +487,23 @@ function buildYearlyFromOcrText(ocrText: string, sourceFilename: string): JukuRe
   return yearly;
 }
 
+function buildYearlyFromOcrTextAuto(ocrText: string, sourceFilename: string) {
+  const detected = detectYearlyFormatFromOcrText(ocrText);
+  // autoの時は A→B の順で試して、件数が多い方を採用
+  const a = buildYearlyFromOcrTextByFormat(ocrText, sourceFilename, "A");
+  const b = buildYearlyFromOcrTextByFormat(ocrText, sourceFilename, "B");
+
+  const aCount = a.tests?.length ?? 0;
+  const bCount = b.tests?.length ?? 0;
+
+  const best = aCount >= bCount ? a : b;
+  const bestFmt: Exclude<YearlyFormat, "auto"> = aCount >= bCount ? "A" : "B";
+
+  return { yearly: best, detected, chosen: bestFmt, aCount, bCount };
+}
+
 /* =========================
-   Direct extraction from PDF（残しておく：保険）
+   Direct extraction (保険)
 ========================= */
 async function extractJukuReportJsonDirectFromPdf(params: {
   bucket: string;
@@ -456,7 +584,6 @@ async function extractJukuReportJsonDirectFromPdf(params: {
         four: { score: null, deviation: null, rank: null, avg: null, diffFromAvg: null, grade: null },
       };
 
-      // 軽い整形
       t.totals.two.score = clampNum(t.totals.two.score, 0, 400);
       t.totals.four.score = clampNum(t.totals.four.score, 0, 500);
       t.totals.two.deviation = clampNum(t.totals.two.deviation, 10, 90);
@@ -466,6 +593,7 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 
       nullifyFieldsByType(t);
       forceNullifyFourIfMissing(t);
+      fixIkuseiTwoFourMix(t);
     }
 
     return { ok: true, reportJson: parsed, raw: out, error: null };
@@ -481,8 +609,6 @@ async function extractJukuReportJsonDirectFromPdf(params: {
 /* =========================
    Trends
 ========================= */
-type Trend = "up" | "down" | "flat" | "unknown";
-
 function judgeTrend(vals: number[], threshold: number): Trend {
   if (!vals || vals.length < 2) return "unknown";
   const first = vals[0];
@@ -504,14 +630,22 @@ function extractYearlyTrends(yearly: JukuReportJson | null) {
 
   const tests = yearly.tests ?? [];
 
+  // 育成は「評価」で推移（2科評価を優先）
   const ikuseiVals: number[] = tests
     .filter((t) => t.testType === "ikusei")
     .map((t: any) => (typeof t?.totals?.two?.grade === "number" ? t.totals.two.grade : null))
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
+  // 公開は「偏差」で推移（4科偏差優先、無ければ2科）
   const kokaiVals: number[] = tests
     .filter((t) => t.testType === "kokai_moshi")
-    .map((t: any) => (typeof t?.totals?.four?.deviation === "number" ? t.totals.four.deviation : t?.totals?.two?.deviation))
+    .map((t: any) =>
+      typeof t?.totals?.four?.deviation === "number"
+        ? t.totals.four.deviation
+        : typeof t?.totals?.two?.deviation === "number"
+          ? t.totals.two.deviation
+          : null
+    )
     .filter((v: any) => typeof v === "number" && Number.isFinite(v));
 
   return {
@@ -530,6 +664,11 @@ export async function POST(req: NextRequest) {
     const singleFiles = fd.getAll("single").filter((v): v is File => v instanceof File);
     const yearlyFileRaw = fd.get("yearly");
     const yearlyFile = yearlyFileRaw instanceof File ? yearlyFileRaw : null;
+
+    // 任意：UIが無くてもOK。後から付けられる
+    const yearlyFormatRaw = fd.get("yearlyFormat");
+    const yearlyFormat: YearlyFormat =
+      yearlyFormatRaw === "A" || yearlyFormatRaw === "B" || yearlyFormatRaw === "auto" ? (yearlyFormatRaw as any) : "auto";
 
     if (singleFiles.length === 0 && !yearlyFile) {
       return new NextResponse("PDFがありません。", { status: 400 });
@@ -562,7 +701,7 @@ export async function POST(req: NextRequest) {
     let yearlyDebug: any | null = null;
 
     if (uploadedYearly) {
-      // OCR（このテキストから“確実に”行を抽出する）
+      // OCR
       try {
         yearlyOcrText = await ocrPdfFromStorage({
           bucket,
@@ -575,17 +714,33 @@ export async function POST(req: NextRequest) {
         console.error("[yearly OCR error]", uploadedYearly?.name, e);
       }
 
-      // ★優先：OCRテキストから機械的に抽出（取りこぼし防止）
+      // できればOCR→正規表現抽出（推奨）
       if (yearlyOcrText) {
-        yearlyReportJson = buildYearlyFromOcrText(yearlyOcrText, uploadedYearly.name);
-        yearlyReportJsonMeta = { ok: true, error: null };
-        yearlyDebug = {
-          mode: "yearly-ocr-regex",
-          ocrLen: yearlyOcrText.length,
-          extractedTests: yearlyReportJson.tests?.length ?? 0,
-        };
+        if (yearlyFormat === "A" || yearlyFormat === "B") {
+          yearlyReportJson = buildYearlyFromOcrTextByFormat(yearlyOcrText, uploadedYearly.name, yearlyFormat);
+          yearlyReportJsonMeta = { ok: true, error: null };
+          yearlyDebug = {
+            mode: "yearly-ocr-regex",
+            forcedFormat: yearlyFormat,
+            ocrLen: yearlyOcrText.length,
+            extractedTests: yearlyReportJson.tests?.length ?? 0,
+          };
+        } else {
+          const auto = buildYearlyFromOcrTextAuto(yearlyOcrText, uploadedYearly.name);
+          yearlyReportJson = auto.yearly;
+          yearlyReportJsonMeta = { ok: true, error: null };
+          yearlyDebug = {
+            mode: "yearly-ocr-regex",
+            detectedFormat: auto.detected,
+            chosenFormat: auto.chosen,
+            tryA: auto.aCount,
+            tryB: auto.bCount,
+            ocrLen: yearlyOcrText.length,
+            extractedTests: yearlyReportJson.tests?.length ?? 0,
+          };
+        }
       } else {
-        // 保険：direct抽出（OCR取れない等の場合）
+        // 保険：direct抽出（OCRが取れない場合）
         const extractedYearly = await extractJukuReportJsonDirectFromPdf({
           bucket,
           path: uploadedYearly.path,
