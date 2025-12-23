@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import ReportTabs from "@/components/ReportTabs";
 
 type Tone = "gentle" | "balanced" | "strict";
 type Target = "student" | "parent" | "teacher";
@@ -43,6 +44,21 @@ type OcrSingleResult =
 
 type AnalyzeResponse = {
   summary: string;
+
+  // ✅ 追加：APIが返す追加フィールド（既存を壊さないため optional）
+  analysisMode?: "full" | "yearly-only";
+  studentType?: "two" | "four";
+  isTwoSubjectStudent?: boolean;
+  warnings?: string[];
+  reports?: {
+    menndan_1min: { title: string; body: string; bullets?: string[]; tags?: string[] };
+    child_simple: { title: string; body: string; action?: string };
+    parent_handout: { title: string; summary: string; points: string[]; nextAction: string };
+  };
+  mistakeSummary?: any;
+  yearlyTrends?: any;
+  commentary?: string;
+
   files: {
     singles: { path: string; name: string; size: number }[];
     yearly: { path: string; name: string; size: number } | null;
@@ -50,10 +66,19 @@ type AnalyzeResponse = {
   ocr: {
     singles: OcrSingleResult[];
     yearly: string | null;
-    yearlyGradeCheck: GradeCheck | null;
+
+    // ✅ 互換のため optional（新旧の違い吸収）
+    yearlyError?: string | null;
+    yearlyGradeCheck?: GradeCheck | null;
+
     yearlyReportJson: ReportJson | null;
     yearlyReportJsonMeta: { ok: boolean; error: string | null } | null;
+
     note: string | null;
+
+    // ✅ 互換：route側が yearlyDebug / yearlyReportJsonMeta など返す場合の吸収
+    yearlyDebug?: any;
+    yearlyReportJsonMeta2?: any;
   };
   selections: {
     tone: Tone;
@@ -200,16 +225,9 @@ export default function AnalyzeClient() {
               PDFを複数枚アップロードできます（例：表紙/成績/各科目など）
             </div>
 
-            <input
-              type="file"
-              accept="application/pdf"
-              multiple
-              onChange={(e) => setSingleFiles(e.target.files)}
-            />
+            <input type="file" accept="application/pdf" multiple onChange={(e) => setSingleFiles(e.target.files)} />
 
-            <div style={{ marginTop: 8, color: "#444", fontSize: 13 }}>
-              選択：{singleCount ? `${singleCount} 件` : "なし"}
-            </div>
+            <div style={{ marginTop: 8, color: "#444", fontSize: 13 }}>選択：{singleCount ? `${singleCount} 件` : "なし"}</div>
 
             {singleFiles && singleCount > 0 && (
               <div style={{ marginTop: 8 }}>
@@ -227,15 +245,9 @@ export default function AnalyzeClient() {
           {/* 年間成績 */}
           <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 14 }}>
             <div style={{ fontWeight: 800, marginBottom: 6 }}>② 1年分の成績（年間）</div>
-            <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>
-              年間の成績表は1枚想定（推移・一覧）
-            </div>
+            <div style={{ color: "#666", fontSize: 13, marginBottom: 10 }}>年間の成績表は1枚想定（推移・一覧）</div>
 
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={(e) => setYearlyFile(e.target.files?.[0] ?? null)}
-            />
+            <input type="file" accept="application/pdf" onChange={(e) => setYearlyFile(e.target.files?.[0] ?? null)} />
 
             <div style={{ marginTop: 8, color: "#444", fontSize: 13 }}>
               選択：{yearlyFile ? `${yearlyFile.name}（${formatBytes(yearlyFile.size)}）` : "なし"}
@@ -252,33 +264,15 @@ export default function AnalyzeClient() {
             <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
               <div style={{ fontWeight: 700, marginBottom: 8 }}>トーン</div>
               <label style={{ display: "block", marginBottom: 6 }}>
-                <input
-                  type="radio"
-                  name="tone"
-                  value="gentle"
-                  checked={tone === "gentle"}
-                  onChange={() => setTone("gentle")}
-                />{" "}
+                <input type="radio" name="tone" value="gentle" checked={tone === "gentle"} onChange={() => setTone("gentle")} />{" "}
                 優しめ（共感多め）
               </label>
               <label style={{ display: "block", marginBottom: 6 }}>
-                <input
-                  type="radio"
-                  name="tone"
-                  value="balanced"
-                  checked={tone === "balanced"}
-                  onChange={() => setTone("balanced")}
-                />{" "}
+                <input type="radio" name="tone" value="balanced" checked={tone === "balanced"} onChange={() => setTone("balanced")} />{" "}
                 バランス（優しさ7：厳しさ3）
               </label>
               <label style={{ display: "block" }}>
-                <input
-                  type="radio"
-                  name="tone"
-                  value="strict"
-                  checked={tone === "strict"}
-                  onChange={() => setTone("strict")}
-                />{" "}
+                <input type="radio" name="tone" value="strict" checked={tone === "strict"} onChange={() => setTone("strict")} />{" "}
                 厳しめ（改善点を明確に）
               </label>
             </div>
@@ -287,33 +281,15 @@ export default function AnalyzeClient() {
             <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
               <div style={{ fontWeight: 700, marginBottom: 8 }}>出力対象</div>
               <label style={{ display: "block", marginBottom: 6 }}>
-                <input
-                  type="radio"
-                  name="target"
-                  value="student"
-                  checked={target === "student"}
-                  onChange={() => setTarget("student")}
-                />{" "}
+                <input type="radio" name="target" value="student" checked={target === "student"} onChange={() => setTarget("student")} />{" "}
                 子ども向け
               </label>
               <label style={{ display: "block", marginBottom: 6 }}>
-                <input
-                  type="radio"
-                  name="target"
-                  value="parent"
-                  checked={target === "parent"}
-                  onChange={() => setTarget("parent")}
-                />{" "}
+                <input type="radio" name="target" value="parent" checked={target === "parent"} onChange={() => setTarget("parent")} />{" "}
                 保護者向け
               </label>
               <label style={{ display: "block" }}>
-                <input
-                  type="radio"
-                  name="target"
-                  value="teacher"
-                  checked={target === "teacher"}
-                  onChange={() => setTarget("teacher")}
-                />{" "}
+                <input type="radio" name="target" value="teacher" checked={target === "teacher"} onChange={() => setTarget("teacher")} />{" "}
                 講師/社内向け
               </label>
             </div>
@@ -323,22 +299,11 @@ export default function AnalyzeClient() {
               <div style={{ fontWeight: 700, marginBottom: 8 }}>分析の観点</div>
               {focusOptions.map((o) => (
                 <label key={o.key} style={{ display: "block", marginBottom: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={focus.includes(o.key)}
-                    onChange={() => toggleFocus(o.key)}
-                  />{" "}
-                  <b>{o.label}</b>
-                  <div style={{ fontSize: 12, color: "#666", marginLeft: 22, marginTop: 2 }}>
-                    {o.desc}
-                  </div>
+                  <input type="checkbox" checked={focus.includes(o.key)} onChange={() => toggleFocus(o.key)} /> <b>{o.label}</b>
+                  <div style={{ fontSize: 12, color: "#666", marginLeft: 22, marginTop: 2 }}>{o.desc}</div>
                 </label>
               ))}
-              {focus.length === 0 && (
-                <div style={{ fontSize: 12, color: "#b00" }}>
-                  ※観点が0だと薄い出力になります（最低1つ推奨）
-                </div>
-              )}
+              {focus.length === 0 && <div style={{ fontSize: 12, color: "#b00" }}>※観点が0だと薄い出力になります（最低1つ推奨）</div>}
             </div>
           </div>
         </div>
@@ -395,14 +360,48 @@ export default function AnalyzeClient() {
             <div style={{ color: "#333" }}>{result.summary}</div>
 
             <div style={{ marginTop: 10, fontSize: 13, color: "#555" }}>
-              設定：tone=<b>{result.selections?.tone}</b> / target=<b>{result.selections?.target}</b>{" "}
-              / focus=<b>{(result.selections?.focus ?? []).join(", ") || "-"}</b>
+              設定：tone=<b>{result.selections?.tone}</b> / target=<b>{result.selections?.target}</b> / focus=
+              <b>{(result.selections?.focus ?? []).join(", ") || "-"}</b>
             </div>
+
+            {/* ✅ 追加：analysisMode / studentType / warnings（あれば表示） */}
+            {(result.analysisMode || result.studentType || (result.warnings?.length ?? 0) > 0) && (
+              <div style={{ marginTop: 10, fontSize: 13, color: "#444" }}>
+                {result.analysisMode && (
+                  <div>
+                    モード：<b>{result.analysisMode}</b>
+                  </div>
+                )}
+                {result.studentType && (
+                  <div>
+                    判定：<b>{result.studentType}</b>
+                    {result.isTwoSubjectStudent ? "（2科目生）" : ""}
+                  </div>
+                )}
+                {!!result.warnings?.length && (
+                  <div style={{ marginTop: 6, padding: 10, borderRadius: 10, background: "#fff7d6" }}>
+                    <b>注意：</b>
+                    <ul style={{ margin: "6px 0 0 18px" }}>
+                      {result.warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
 
             {result.ocr?.note && (
               <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: "#fff7d6" }}>
                 <b>注意：</b>
                 {result.ocr.note}
+              </div>
+            )}
+
+            {/* ✅ 追加：面談/配布/子ども向けレポート（reportsが返ってきたら表示） */}
+            {result.reports && (
+              <div style={{ marginTop: 12, borderTop: "1px solid #eee", paddingTop: 12 }}>
+                <ReportTabs reports={result.reports} />
               </div>
             )}
           </div>
@@ -428,45 +427,27 @@ export default function AnalyzeClient() {
                       </b>
                     </div>
                   ) : (
-                    <div style={{ color: "#666", marginBottom: 8 }}>
-                      ※単発の成績JSONがまだ取れていないため、集計できませんでした
-                    </div>
+                    <div style={{ color: "#666", marginBottom: 8 }}>※単発の成績JSONがまだ取れていないため、集計できませんでした</div>
                   )}
 
                   {!!result.analysis.singles?.subjects?.length && (
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                       <thead>
                         <tr>
-                          <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
-                            科目
-                          </th>
-                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
-                            平均偏差値
-                          </th>
-                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
-                            直近偏差値
-                          </th>
-                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
-                            最低偏差値
-                          </th>
-                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>
-                            件数
-                          </th>
+                          <th style={{ textAlign: "left", borderBottom: "1px solid #ddd", padding: "6px 0" }}>科目</th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>平均偏差値</th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>直近偏差値</th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>最低偏差値</th>
+                          <th style={{ textAlign: "right", borderBottom: "1px solid #ddd", padding: "6px 0" }}>件数</th>
                         </tr>
                       </thead>
                       <tbody>
                         {result.analysis.singles.subjects.map((s: any) => (
                           <tr key={s.name}>
                             <td style={{ padding: "6px 0" }}>{s.name}</td>
-                            <td style={{ textAlign: "right" }}>
-                              {typeof s.avgDeviation === "number" ? s.avgDeviation.toFixed(1) : "-"}
-                            </td>
-                            <td style={{ textAlign: "right" }}>
-                              {typeof s.lastDeviation === "number" ? s.lastDeviation.toFixed(1) : "-"}
-                            </td>
-                            <td style={{ textAlign: "right" }}>
-                              {typeof s.minDeviation === "number" ? s.minDeviation.toFixed(1) : "-"}
-                            </td>
+                            <td style={{ textAlign: "right" }}>{typeof s.avgDeviation === "number" ? s.avgDeviation.toFixed(1) : "-"}</td>
+                            <td style={{ textAlign: "right" }}>{typeof s.lastDeviation === "number" ? s.lastDeviation.toFixed(1) : "-"}</td>
+                            <td style={{ textAlign: "right" }}>{typeof s.minDeviation === "number" ? s.minDeviation.toFixed(1) : "-"}</td>
                             <td style={{ textAlign: "right" }}>{s.count ?? 0}</td>
                           </tr>
                         ))}
@@ -483,16 +464,12 @@ export default function AnalyzeClient() {
                       弱点（偏差値が低い）：
                       <b>
                         {result.analysis.yearly.weakest.name}（
-                        {typeof result.analysis.yearly.weakest.deviation === "number"
-                          ? result.analysis.yearly.weakest.deviation.toFixed(1)
-                          : "-"}
+                        {typeof result.analysis.yearly.weakest.deviation === "number" ? result.analysis.yearly.weakest.deviation.toFixed(1) : "-"}
                         ）
                       </b>
                     </div>
                   ) : (
-                    <div style={{ color: "#666" }}>
-                      ※年間の成績JSONがまだ取れていないため、集計できませんでした
-                    </div>
+                    <div style={{ color: "#666" }}>※年間の成績JSONがまだ取れていないため、集計できませんでした</div>
                   )}
                 </div>
               </div>
@@ -512,21 +489,15 @@ export default function AnalyzeClient() {
                       <div style={{ fontWeight: 800 }}>{r.name}</div>
                       <div style={{ fontSize: 12, color: "#666" }}>{formatBytes(r.size)}</div>
 
-                      {"ok" in r && r.ok === false && (
-                        <div style={{ marginTop: 8, color: "#b00", fontWeight: 700 }}>
-                          OCR失敗：{r.error}
-                        </div>
-                      )}
+                      {"ok" in r && r.ok === false && <div style={{ marginTop: 8, color: "#b00", fontWeight: 700 }}>OCR失敗：{r.error}</div>}
 
                       {"ok" in r && r.ok === true && (
                         <>
                           {r.gradeCheck && (
                             <div style={{ marginTop: 8, fontSize: 13 }}>
                               判定：{" "}
-                              <b style={{ color: r.gradeCheck.isGradeReport ? "#0a0" : "#b00" }}>
-                                {r.gradeCheck.isGradeReport ? "成績表" : "成績表ではない"}
-                              </b>{" "}
-                              （信頼度 {r.gradeCheck.confidence}）<br />
+                              <b style={{ color: r.gradeCheck.isGradeReport ? "#0a0" : "#b00" }}>{r.gradeCheck.isGradeReport ? "成績表" : "成績表ではない"}</b>（信頼度{" "}
+                              {r.gradeCheck.confidence}）<br />
                               <span style={{ color: "#555" }}>{r.gradeCheck.reason}</span>
                             </div>
                           )}
@@ -550,11 +521,7 @@ export default function AnalyzeClient() {
                             </>
                           )}
 
-                          {r.reportJsonMeta && !r.reportJson && (
-                            <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
-                              JSON化：{r.reportJsonMeta.error}
-                            </div>
-                          )}
+                          {r.reportJsonMeta && !r.reportJson && <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>JSON化：{r.reportJsonMeta.error}</div>}
 
                           {/* OCR text */}
                           <details style={{ marginTop: 10 }}>
@@ -623,9 +590,7 @@ export default function AnalyzeClient() {
                   )}
 
                   {result.ocr?.yearlyReportJsonMeta && !result.ocr.yearlyReportJson && (
-                    <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
-                      JSON化：{result.ocr.yearlyReportJsonMeta.error}
-                    </div>
+                    <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>JSON化：{result.ocr.yearlyReportJsonMeta.error}</div>
                   )}
 
                   {result.ocr?.yearly && (
